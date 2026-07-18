@@ -1,0 +1,34 @@
+[Unit]
+Description=Kylin Secure OS Agent
+After=network.target
+
+[Service]
+Type=simple
+User=kylinos-agent
+Group=kylinos-agent
+WorkingDirectory=/opt/kylin-os-agent
+ExecStart=/opt/kylin-os-agent/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+# OS 层沙盒：补上"应用沙盒之外没有 OS 隔离"的短板
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/kylin-os-agent/data
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+CapabilityBoundingSet=
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

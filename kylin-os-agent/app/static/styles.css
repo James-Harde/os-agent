@@ -1,0 +1,75 @@
+/* ===== Only what DaisyUI / Tailwind can't cover ===== */
+
+/* Smooth scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(0.3 0 0 / 0.4);
+  border-radius: 999px;
+}
+
+/* Step grid for trace timeline */
+.timeline {
+  display: grid;
+  gap: 0.5rem;
+}
+.step {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 0.5rem;
+  border: 1px solid oklch(0.35 0 0 / 0.3);
+  border-radius: 0.625rem;
+  padding: 0.5rem 0.625rem;
+  background: oklch(0.22 0 0 / 0.5);
+}
+.step-label {
+  font-size: 11px;
+  font-weight: 800;
+  color: oklch(0.7 0 0 / 0.8);
+}
+
+/* Mini rows (replaces old .mini-row) */
+.mini-row {
+  border: 1px solid oklch(0.3 0 0 / 0.2);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  background: oklch(0.2 0 0 / 0.4);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.mini-row strong { color: oklch(0.95 0 0 / 0.95); }
+
+/* Policy pills (auto/confirm/deny badge helper) */
+.policy-pill {
+  float: right;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 4px;
+}
+.policy-auto {
+  background: oklch(0.4 0.1 145 / 0.15);
+  color: oklch(0.7 0.15 145);
+}
+.policy-confirm {
+  background: oklch(0.4 0.1 80 / 0.15);
+  color: oklch(0.75 0.15 80);
+}
+.policy-deny {
+  background: oklch(0.4 0.12 25 / 0.15);
+  color: oklch(0.65 0.18 25);
+}
+
+/* Pre-code-like text inside answer card */
+.pre-answer {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  font-family: "Inter", "Microsoft YaHei", sans-serif;
+  font-size: 0.8125rem;
+}

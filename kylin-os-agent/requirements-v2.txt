@@ -1,0 +1,20 @@
+# LangGraph 版本依赖
+# 原依赖保留
+fastapi
+uvicorn
+pydantic
+slowapi
+
+# LangGraph 核心
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+
+# 模型适配：兼容 OpenAI 协议即可接入 DeepSeek
+langchain-openai>=0.2.0
+
+# LangGraph SQLite 检查点持久化
+langgraph-checkpoint-sqlite>=1.0.0
+
+# MCP 可选适配（如需要）
+# langchain-mcp-adapters>=0.1.0

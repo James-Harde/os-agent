@@ -1,0 +1,45 @@
+# 7-13 ~ 7-14 进度记录
+
+## 完成任务
+1. ✅ 将 kylin-os-agent 从手写编排重构为 LangGraph 实现（app_v2）
+2. ✅ 增加了纯 LangChain AgentExecutor 实现（app_v3），用于对照学习
+3. ✅ 写了 LangChain vs LangGraph 对比文档
+
+## 已创建文件清单
+
+### app_v2/ — LangGraph 版
+```
+app_v2/
+├── main.py, graph/{state,nodes,edges,builder,runner}.py
+├── tools/{system_tools,registry}.py
+├── model/{chat_model,command_runner}.py
+├── safety/guard.py, approval/interrupt.py
+├── memory/checkpointer.py, audit/logger.py
+```
+
+### app_v3/ — 纯 LangChain 版
+```
+app_v3/
+├── main.py                    # FastAPI 入口（调 run_agent）
+├── agent_executor.py          # ★ 核心：AgentExecutor 接管循环
+├── tools/system_tools.py      # @tool 装饰的工具
+├── model/{chat_model,command_runner}.py
+├── safety/guard.py
+├── memory/conversation_store.py  # 手写 SQLite（对比 v2 的 Checkpointer）
+├── audit/logger.py
+└── approval/human_loop.py        # 用异常模拟人审（对比 v2 的 interrupt）
+```
+
+### 根目录文档
+- `requirements-v2.txt` — 新依赖（两个版本共享）
+- `ARCHITECTURE-v2.md` — v2 架构说明
+- `LANGCHAIN-vs-LANGGRAPH.md` — 框架对比文档（面试学习重点）
+
+## 还没做的
+1. ❌ pip install 依赖（你手动执行）
+2. ❌ 运行验证
+3. ❌ 前端 UI 适配
+4. ❌ MCP 迁移
+
+## 下一步
+你装依赖 → 跑 v2/v3 → 对比验证 → 然后我逐模块讲解设计取舍

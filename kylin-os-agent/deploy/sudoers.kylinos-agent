@@ -1,0 +1,12 @@
+# 最小化 sudo 白名单：只放行真正需要 root 的只读运维命令
+# 安装：cp sudoers.kylinos-agent /etc/sudoers.d/kylinos-agent
+#       chmod 440 /etc/sudoers.d/kylinos-agent
+#       visudo -c    ← 必须验证语法！
+
+kylinos-agent ALL=(root) NOPASSWD: /usr/bin/systemctl status *
+kylinos-agent ALL=(root) NOPASSWD: /usr/sbin/ss -ltnp
+kylinos-agent ALL=(root) NOPASSWD: /usr/sbin/netstat -tulpn
+kylinos-agent ALL=(root) /usr/bin/journalctl -p * -n * --no-pager
+kylinos-agent ALL=(root) NOPASSWD: /usr/bin/ps -eo pid,user,comm,%cpu,%mem
+kylinos-agent ALL=(root) NOPASSWD: /bin/df -h *
+kylinos-agent ALL=(root) NOPASSWD: /usr/bin/du -sh *
