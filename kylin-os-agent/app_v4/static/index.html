@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>麒麟安全运维 Agent v4</title>
+  <!-- Tailwind + DaisyUI via CDN（无构建流程，开箱即用）-->
+  <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@5/dist/full.css" rel="stylesheet" type="text/css" />
+  <style>
+    /* 自定义滚动条 + 打字机光标 */
+    .chat-box::-webkit-scrollbar { width: 6px; }
+    .chat-box::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
+    .typing::after {
+      content: "▍";
+      animation: blink 1s steps(1) infinite;
+      color: #38bdf8;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+    .bubble-user { background: #1e3a5f; }
+    .bubble-ai { background: #1f2937; }
+    .badge-low { background: #064e3b; color: #6ee7b7; }
+    .badge-high { background: #7f1d1d; color: #fca5a5; }
+  </style>
+</head>
+<body class="bg-base-200 min-h-screen">
+  <div class="navbar bg-base-300 shadow-lg px-6">
+    <div class="flex-1">
+      <span class="text-xl font-bold text-info">麒麟安全运维 Agent</span>
+      <span class="text-xs text-base-content/60 ml-2">v4 · LangGraph · B/S Demo</span>
+    </div>
+    <div class="flex-none gap-2">
+      <span id="health-dot" class="badge badge-outline badge-warning">检查中...</span>
+      <button class="btn btn-sm btn-ghost" onclick="loadTools()">刷新工具</button>
+    </div>
+  </div>
+
+  <div class="container mx-auto p-4 max-w-7xl">
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+      <!-- =============== 左侧：聊天主区 =============== -->
+      <div class="lg:col-span-2 flex flex-col gap-3">
+        <!-- 状态栏 -->
+        <div class="card bg-base-100 shadow-sm p-3 flex flex-wrap gap-3 items-center text-sm">
+          <div class="flex items-center gap-2">
+            <span class="text-base-content/60">Thread:</span>
+            <span id="thread-id" class="font-mono text-info">-</span>
+            <button class="btn btn-xs btn-ghost" onclick="editThread()" title="输入已有 thread_id 继续对话">修改</button>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-base-content/60">Intent:</span>
+            <span id="current-intent" class="badge badge-info badge-sm">-</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-base-content/60">Guard:</span>
+            <span id="current-guard" class="badge badge-sm">-</span>
+          </div>
+        </div>
+
+        <!-- 消息列表 -->
+        <div id="chat-box" class="card bg-base-100 shadow-md chat-box overflow-y-auto p-4 space-y-3"
+             style="min-height: 420px; max-height: 60vh;">
+          <div class="text-center text-base-content/40 text-sm py-8">
+            欢迎使用麒麟安全运维 Agent，请输入您的运维问题。<br/>
+            示例：<code class="text-info">知识库：磁盘使用率怎么查</code>、<code class="text-info">分析磁盘</code>、<code class="text-info">查询端口 8080</code>
+          </div>
+        </div>
+
+        <!-- 输入区 -->
+        <div class="card bg-base-100 shadow-md p-3">
+          <div class="join w-full">
+            <input id="msg-input" type="text" placeholder="输入运维问题..."
+                   class="input input-bordered join-item flex-1" onkeydown="if(event.key==='Enter')sendMessage()" />
+            <button id="send-btn" class="btn btn-info join-item" onclick="sendMessage()">发送</button>
+          </div>
+          <div class="text-xs text-base-content/50 mt-1">
+            支持流式响应 · 多轮对话（自动保持 thread_id）· 按 Enter 发送
+          </div>
+        </div>
+      </div>
+
+      <!-- =============== 右侧：工具 + Trace =============== -->
+      <div class="flex flex-col gap-3">
+        <!-- 工具列表 -->
+        <div class="card bg-base-100 shadow-md p-4">
+          <h2 class="font-bold text-base mb-2 flex items-center justify-between">
+            <span>工具列表</span>
+            <span id="tool-count" class="badge badge-outline badge-sm">0</span>
+          </h2>
+          <div id="tool-list" class="space-y-1 text-sm max-h-48 overflow-y-auto">
+            <div class="text-base-content/40 text-xs">点击"刷新工具"加载</div>
+          </div>
+        </div>
+
+        <!-- Trace 查询 -->
+        <div class="card bg-base-100 shadow-md p-4">
+          <h2 class="font-bold text-base mb-2">Trace 查询</h2>
+          <div class="join w-full mb-2">
+            <input id="trace-input" type="text" placeholder="输入 run_id"
+                   class="input input-bordered input-sm join-item flex-1 font-mono text-xs" />
+            <button class="btn btn-sm btn-outline join-item" onclick="queryTrace()">查询</button>
+          </div>
+          <div id="trace-result" class="text-xs max-h-64 overflow-y-auto bg-base-200 rounded p-2 font-mono">
+            <div class="text-base-content/40">输入 run_id 查看 trace_steps</div>
+          </div>
+        </div>
+
+        <!-- 审计日志 -->
+        <div class="card bg-base-100 shadow-md p-4">
+          <h2 class="font-bold text-base mb-2 flex items-center justify-between">
+            <span>最近审计</span>
+            <button class="btn btn-xs btn-ghost" onclick="loadAudit()">刷新</button>
+          </h2>
+          <div id="audit-list" class="space-y-1 text-xs max-h-48 overflow-y-auto">
+            <div class="text-base-content/40">点击"刷新"加载</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =============== JavaScript =============== -->
+  <script>
+    // ---------- 全局状态 ----------
+    let currentThreadId = null;
+    const API = ""; // 同源部署，用相对路径
+
+    // ---------- 启动：健康检查 + 加载工具 ----------
+    window.addEventListener("load", async () => {
+      await checkHealth();
+      await loadTools();
+      await loadAudit();
+    });
+
+    async function checkHealth() {
+      try {
+        const r = await fetch(API + "/api/health");
+        const d = await r.json();
+        const dot = document.getElementById("health-dot");
+        if (d.status === "ok") {
+          dot.className = "badge badge-outline badge-success";
+          dot.textContent = "在线 · " + d.engine;
+        } else {
+          dot.className = "badge badge-outline badge-error";
+          dot.textContent = "异常";
+        }
+      } catch (e) {
+        const dot = document.getElementById("health-dot");
+        dot.className = "badge badge-outline badge-error";
+        dot.textContent = "离线";
+      }
+    }
+
+    // ---------- 工具列表 ----------
+    async function loadTools() {
+      try {
+        const r = await fetch(API + "/api/mcp", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+        });
+        const d = await r.json();
+        const tools = d.result?.tools || [];
+        document.getElementById("tool-count").textContent = tools.length;
+        const html = tools.map(t => {
+          const permColor = t.permission === "auto" ? "text-success"
+                          : t.permission === "confirm" ? "text-warning" : "text-error";
+          return `<div class="flex items-center justify-between py-1 border-b border-base-200 last:border-0">
+            <span class="font-mono text-info">${t.name}</span>
+            <div class="flex items-center gap-1">
+              <span class="text-base-content/50 text-xs">${t.riskLevel === "low" ? "低风险" : "中风险"}</span>
+              <span class="${permColor} text-xs">●${t.permission}</span>
+            </div>
+          </div>`;
+        }).join("");
+        document.getElementById("tool-list").innerHTML = html || '<div class="text-base-content/40 text-xs">无工具</div>';
+      } catch (e) {
+        document.getElementById("tool-list").innerHTML = '<div class="text-error text-xs">加载失败</div>';
+      }
+    }
+
+    // ---------- 审计日志 ----------
+    async function loadAudit() {
+      try {
+        const r = await fetch(API + "/api/audit?limit=8");
+        const d = await r.json();
+        const items = d.items || [];
+        const html = items.map(it => `<div class="py-1 border-b border-base-200 last:border-0">
+          <span class="font-mono text-xs text-base-content/60">${it.run_id?.slice(0, 8)}</span>
+          <span class="ml-1">${it.intent || "-"}</span>
+          <span class="ml-1 ${it.guard_decision === "deny" ? "text-error" : "text-success"}">●${it.guard_decision}</span>
+        </div>`).join("");
+        document.getElementById("audit-list").innerHTML = html || '<div class="text-base-content/40 text-xs">无记录</div>';
+      } catch (e) {
+        document.getElementById("audit-list").innerHTML = '<div class="text-error text-xs">加载失败</div>';
+      }
+    }
+
+    // ---------- Trace 查询 ----------
+    async function queryTrace() {
+      const runId = document.getElementById("trace-input").value.trim();
+      if (!runId) { alert("请输入 run_id"); return; }
+      const box = document.getElementById("trace-result");
+      box.innerHTML = '<div class="text-base-content/40">查询中...</div>';
+      try {
+        const r = await fetch(API + "/api/traces/" + encodeURIComponent(runId));
+        if (r.status === 404) {
+          box.innerHTML = '<div class="text-error">未找到该 run_id</div>';
+          return;
+        }
+        const d = await r.json();
+        const steps = d.trace_steps || [];
+        const tools = d.tool_calls || [];
+        let html = `<div class="text-info mb-1">Run: ${d.run_id?.slice(0, 12)}... | Intent: ${d.intent}</div>`;
+        html += `<div class="text-base-content/60 mb-1">Trace 节点 (${steps.length}):</div>`;
+        html += steps.map(s => `<div class="pl-2 border-l-2 border-base-300 mb-1">
+          <span class="text-info">${s.node}</span>
+          <span class="text-base-content/40 ml-1">${s.duration_ms}ms</span>
+          <div class="text-base-content/50 text-xs">${JSON.stringify(s.detail || {}).slice(0, 120)}</div>
+        </div>`).join("");
+        if (tools.length) {
+          html += `<div class="text-base-content/60 mt-2 mb-1">工具调用 (${tools.length}):</div>`;
+          html += tools.map(t => `<div class="pl-2 border-l-2 ${t.status === 'success' ? 'border-success' : 'border-error'} mb-1">
+            <span class="text-info">${t.tool_name}</span>
+            <span class="${t.status === 'success' ? 'text-success' : 'text-error'}">●${t.status}</span>
+            <span class="text-base-content/40 ml-1">${t.duration_ms || 0}ms</span>
+          </div>`).join("");
+        }
+        box.innerHTML = html;
+      } catch (e) {
+        box.innerHTML = '<div class="text-error">查询失败: ' + e.message + '</div>';
+      }
+    }
+
+    // ---------- 多轮对话：修改 thread_id ----------
+    function editThread() {
+      const existing = currentThreadId || "";
+      const input = prompt("输入 thread_id（留空则自动生成新对话）:", existing);
+      if (input !== null) {
+        currentThreadId = input.trim() || null;
+        document.getElementById("thread-id").textContent = currentThreadId || "（新对话）";
+      }
+    }
+
+    // ---------- 发送消息（流式）----------
+    async function sendMessage() {
+      const input = document.getElementById("msg-input");
+      const msg = input.value.trim();
+      if (!msg) return;
+      input.value = "";
+
+      // 用户气泡
+      appendBubble("user", msg);
+      // AI 占位气泡（打字机）
+      const aiBubble = appendBubble("ai", "", true);
+
+      const payload = { message: msg };
+      if (currentThreadId) payload.thread_id = currentThreadId;
+
+      try {
+        const resp = await fetch(API + "/api/chat/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (!resp.ok) {
+          aiBubble.innerHTML = '<span class="text-error">请求失败: ' + resp.status + '</span>';
+          aiBubble.classList.remove("typing");
+          return;
+        }
+
+        // 用 ReadableStream 读 SSE（支持 POST body，比 EventSource 更灵活）
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let finalAnswer = "";
+        let toolCalls = [];
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          // 按行解析 SSE
+          const lines = buffer.split("\n");
+          buffer = lines.pop(); // 最后一行可能不完整，留到下次
+
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            let event;
+            try { event = JSON.parse(line.slice(6)); } catch (e) { continue; }
+
+            handleSSEEvent(event, aiBubble, (ans) => { finalAnswer = ans; },
+              (tc) => { toolCalls = tc; });
+          }
+        }
+
+        aiBubble.classList.remove("typing");
+        // 刷新审计
+        loadAudit();
+      } catch (e) {
+        aiBubble.classList.remove("typing");
+        aiBubble.innerHTML = '<span class="text-error">连接失败: ' + e.message + '</span>';
+      }
+    }
+
+    // ---------- 处理 SSE 事件 ----------
+    function handleSSEEvent(event, aiBubble, onAnswer, onTools) {
+      const type = event.event;
+
+      if (type === "preflight") {
+        updateGuard(event.guard_decision);
+      } else if (type === "plan") {
+        document.getElementById("current-intent").textContent = event.intent || "-";
+        // 展示规划的工具
+        const tools = (event.plan || []).map(p => p.tool).join(", ") || "无";
+        appendMeta(aiBubble, `📋 规划: ${tools}`);
+      } else if (type === "execute") {
+        const calls = event.tool_calls || [];
+        onTools(calls);
+        calls.forEach(c => {
+          const icon = c.status === "success" ? "✅" : c.status === "pending_approval" ? "⏳" : "❌";
+          appendMeta(aiBubble, `${icon} ${c.tool_name} · ${c.status} · ${c.duration_ms || 0}ms`);
+        });
+      } else if (type === "summarize" || type === "deny") {
+        const answer = event.answer || "";
+        onAnswer(answer);
+        aiBubble.innerHTML = renderMarkdown(answer);
+        if (event.thread_id) {
+          currentThreadId = event.thread_id;
+          document.getElementById("thread-id").textContent = event.thread_id.slice(0, 16) + "...";
+        }
+      } else if (type === "loop") {
+        appendMeta(aiBubble, `🔁 循环熔断: ${event.reason || ""}`);
+      } else if (type === "done") {
+        // 最终同步
+        if (event.thread_id) {
+          currentThreadId = event.thread_id;
+          document.getElementById("thread-id").textContent = event.thread_id.slice(0, 16) + "...";
+        }
+        if (event.intent) document.getElementById("current-intent").textContent = event.intent;
+        if (event.guard_decision) updateGuard(event.guard_decision);
+        // 把 run_id 填入 trace 输入框，方便一键查询
+        if (event.run_id) document.getElementById("trace-input").value = event.run_id;
+      }
+    }
+
+    // ---------- 气泡渲染 ----------
+    function appendBubble(role, text, typing = false) {
+      const box = document.getElementById("chat-box");
+      const div = document.createElement("div");
+      const isUser = role === "user";
+      div.className = `chat ${isUser ? "chat-end" : "chat-start"}`;
+      const bubbleClass = isUser ? "bubble-user" : "bubble-ai";
+      const textColor = isUser ? "text-primary-content" : "text-base-content";
+      div.innerHTML = `<div class="chat-bubble ${bubbleClass} ${textColor} ${typing ? "typing" : ""} whitespace-pre-wrap">${escapeHtml(text)}</div>`;
+      box.appendChild(div);
+      box.scrollTop = box.scrollHeight;
+      return div.querySelector(".chat-bubble");
+    }
+
+    // 在 AI 气泡下方追加元信息（工具调用状态）
+    function appendMeta(aiBubble, text) {
+      const meta = document.createElement("div");
+      meta.className = "text-xs text-base-content/60 mt-1 pl-2 border-l-2 border-info";
+      meta.textContent = text;
+      aiBubble.appendChild(meta);
+      // 滚动到底
+      const box = document.getElementById("chat-box");
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function updateGuard(decision) {
+      const el = document.getElementById("current-guard");
+      el.textContent = decision;
+      el.className = "badge badge-sm " + (decision === "deny" ? "badge-high" : "badge-low");
+    }
+
+    // 极简 Markdown 渲染（代码块 + 行内代码）
+    function renderMarkdown(text) {
+      let safe = escapeHtml(text);
+      safe = safe.replace(/`([^`]+)`/g, '<code class="bg-base-300 px-1 rounded text-info">$1</code>');
+      safe = safe.replace(/\n/g, "<br/>");
+      return safe;
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+  </script>
+</body>
+</html>
