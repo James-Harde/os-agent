@@ -37,6 +37,8 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     conversation_id: str | None = None
 
+@app.get("/api/zby")
+print("zby")
 
 @app.post("/api/chat")
 @limiter.limit("10/minute")

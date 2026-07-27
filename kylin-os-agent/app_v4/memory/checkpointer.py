@@ -17,19 +17,21 @@ import aiosqlite
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-_DB_PATH = str(Path(__file__).resolve().parents[2] / "data" / "agent_v4.db")
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "agent_v4.db"
 
 
-def build_checkpointer() -> SqliteSaver:
-    """构建同步 SQLite 检查点。存 data/agent_v4.db。"""
-    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+def build_checkpointer(db_path: str | Path | None = None) -> SqliteSaver:
+    """构建同步 SQLite 检查点。"""
+    path = Path(db_path) if db_path else DEFAULT_DB_PATH
+    os.makedirs(os.path.dirname(str(path)), exist_ok=True)
     import sqlite3
-    conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     return SqliteSaver(conn)
 
 
-async def build_async_checkpointer() -> AsyncSqliteSaver:
+async def build_async_checkpointer(db_path: str | Path | None = None) -> AsyncSqliteSaver:
     """构建异步 SQLite 检查点（必须在运行中的事件循环里调用）。"""
-    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
-    conn = await aiosqlite.connect(_DB_PATH)
+    path = Path(db_path) if db_path else DEFAULT_DB_PATH
+    os.makedirs(os.path.dirname(str(path)), exist_ok=True)
+    conn = await aiosqlite.connect(str(path))
     return AsyncSqliteSaver(conn)

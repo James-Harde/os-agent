@@ -1,19 +1,16 @@
-"""RAG 最小链 — 零 heavy 依赖。
+"""RAG 子包 — Milvus 混合检索主路径。
 
 模块：
-  - chunk       字符滑动窗口切片（带重叠）
-  - vector      纯 Python TF-IDF + 余弦相似度
-  - bm25        简单 BM25 重排
-  - store       SQLite 文档/切片持久化（可选）
-  - pipeline    索引 + 检索编排
-  - eval        Recall@k 评测
+  - milvus_store    : MilvusRAGStore（dense + BM25 sparse + RRF + citations）
+  - store_factory   : build_milvus_rag_store 工厂（配置 + 语料 + Embedding + Milvus 装配）
+  - real_embed      : OpenAICompatibleEmbedder（真实 Embedding 后端，独立配置）
+  - dense_embed     : FakeDenseEmbedder（测试 double，离线确定性）
+  - metrics         : Recall@k / MRR@k / nDCG@k 评测指标（通用，不绑定检索后端）
+  - data/           : 版本化语料（corpus_v1.json）
 
-设计取舍：
-  - 不引入 faiss/chroma/sentence-transformers，整个包仅用 Python 标准库。
-  - 中文采用「单字 + 二元组」混合 token，无需 jieba 也能获得不错召回。
-  - 向量用稀疏 dict 表示，余弦相似度 O(|query_terms|)，小规模完全够用。
+主路径唯一：rag_search → MilvusRAGStore.search → Milvus hybrid_search。
 """
 
-from app_v4.rag.pipeline import RAGIndex
+from app_v4.rag.milvus_store import MilvusRAGStore
 
-__all__ = ["RAGIndex"]
+__all__ = ["MilvusRAGStore"]

@@ -16,13 +16,29 @@ should be able to handle the current high-frequency interview questions and
 realistic scenario questions for Agent, LLM application, and adjacent backend
 roles using evidence produced by the project.
 
-For this project, a new task or conversation should read these files before
-continuing implementation or teaching:
+This project is no longer driven by competition constraints, contest scoring,
+zero-dependency restrictions, domestic-only substitutions, or toy demo
+standards. Treat it as a job-search portfolio project. Features may remain
+narrow, but each feature must use industry-mainstream practices wherever
+practical. Hand-written replacements for mature ecosystem capabilities are
+acceptable only as explicitly labeled fallbacks or learning baselines, never as
+production-equivalent PASS evidence.
+
+For a new project phase, a changed objective, or a missing/stale handoff, read
+these files before continuing implementation or teaching:
 
 1. `D:\klin-agent\kylin-os-agent\AGENT-CHAIN.md` for the current roadmap,
    stage, acceptance gates, and interview coverage map.
 2. `D:\klin-agent\kylin-os-agent\INTERVIEW-MARKET.md` for the dated market
    evidence and current high-frequency question set.
+
+For a continuing `app_v4` window with a current handoff, use the compact recovery
+path instead: read `D:\klin-agent\app4-需求清单.md`, `app_v4/docs/WORK-STATE.md`,
+`app_v4/docs/HANDOFF-LATEST.md`, and the focused Git diff. Do not reread the full
+roadmap or market report unless the handoff requests it, a milestone is reached,
+the objective changes, or the compact files conflict. This rule exists to keep
+long audits and repairs resumable without repeatedly spending context on stable
+background material.
 
 Do not treat a topic as learned merely because it appears in the roadmap.
 Interview readiness requires runnable code or a focused runnable lab, tests,
@@ -34,6 +50,9 @@ or diagnosis from the user.
 - Prefer mature, mainstream frameworks and established ecosystem solutions.
 - Do not reimplement framework capabilities at a low level unless there is a
   concrete technical reason. Explain that reason before proposing the custom path.
+- If existing code hand-rolls a capability normally served by mainstream
+  infrastructure or libraries, audit it as `PARTIAL` or `FAIL` for interview
+  readiness unless it is only a clearly isolated test double or fallback.
 - Prefer real project practices: dependency management, configuration and
   environment variables, API contracts, persistence, error handling, logging,
   observability, security boundaries, testing, deployment, and maintenance.
@@ -179,10 +198,24 @@ the first evidence-worthy completed case, and remind the user before doing so.
 - At a chain or milestone boundary, identify new high-frequency interview
   questions that now have enough evidence for a note and remind the user to
   consolidate them.
-- When a task is becoming too long, context may be compacted, or the user plans
-  to switch tasks, first save a durable handoff in `AGENT-CHAIN.md`: current
-  chain and stage, files, commands, decisions, evidence, unresolved questions,
-  candidate interview-note entries, and the next gate.
+- Long tasks must use active checkpointing, not only end-of-window summaries.
+  After each acceptance-level behavior, after roughly 20 tool calls or 45
+  minutes of work, or when scope changes, update the durable project fact source.
+  For project-wide roadmap changes, prefer `AGENT-CHAIN.md`. For continuing
+  `app_v4` audit or repair windows, update `app_v4/docs/WORK-STATE.md` and the
+  short `app_v4/docs/HANDOFF-LATEST.md`; synchronize milestone-level changes to
+  `AGENT-CHAIN.md` only when the current phase is complete.
+- When context is becoming large, may be compacted, or the user plans to switch
+  tasks, stop expanding scope and save a durable handoff before continuing:
+  current chain and stage, files, commands and results, decisions, evidence,
+  unresolved questions, candidate interview-note entries, the next gate, no more
+  than three next actions, and the first command the next task should run.
+- `HANDOFF-LATEST.md` is the latest recovery capsule, not the long-term roadmap.
+  `WORK-STATE.md` is the current app_v4 progress source, while `AGENT-CHAIN.md`
+  remains the project-wide roadmap and milestone evidence source.
+- A new task should trust the handoff enough to avoid a full re-audit, but must
+  verify key facts with focused checks such as `git status`, relevant diffs, and
+  the smallest meaningful tests before continuing.
 - If `INTERVIEW-NOTES.md` already exists, update completed evidence-backed
   entries before a handoff. Do not write unverified draft answers as mastered.
 - At project completion, remind the user to finish the interview notes and use

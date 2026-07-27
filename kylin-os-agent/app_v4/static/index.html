@@ -72,9 +72,10 @@
             <input id="msg-input" type="text" placeholder="输入运维问题..."
                    class="input input-bordered join-item flex-1" onkeydown="if(event.key==='Enter')sendMessage()" />
             <button id="send-btn" class="btn btn-info join-item" onclick="sendMessage()">发送</button>
+            <button id="cancel-btn" class="btn btn-error join-item hidden" onclick="cancelStream()">● 取消</button>
           </div>
           <div class="text-xs text-base-content/50 mt-1">
-            支持流式响应 · 多轮对话（自动保持 thread_id）· 按 Enter 发送
+            支持流式响应 · 多轮对话（自动保持 thread_id）· 按 Enter 发送 · 流式时可点「取消」中断
           </div>
         </div>
       </div>
@@ -115,6 +116,17 @@
             <div class="text-base-content/40">点击"刷新"加载</div>
           </div>
         </div>
+
+        <!-- 审批卡片（§5 Gate 2：前端展示真实审批卡片 + approve/reject/resume）-->
+        <div id="approval-card" class="card bg-base-100 shadow-md p-4 hidden border-2 border-warning">
+          <h2 class="font-bold text-base mb-2 flex items-center justify-between">
+            <span class="text-warning">⏳ 待人工审批</span>
+            <span id="approval-count" class="badge badge-warning badge-sm">0</span>
+          </h2>
+          <div id="approval-list" class="space-y-2 text-xs">
+            <div class="text-base-content/40">暂无待审批项</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -124,6 +136,9 @@
     // ---------- 全局状态 ----------
     let currentThreadId = null;
     const API = ""; // 同源部署，用相对路径
+    let pendingApprovals = [];   // 当前待审批列表
+    let lastApprovalRunId = null;
+    let lastApprovalThreadId = null;
 
     // ---------- 启动：健康检查 + 加载工具 ----------
     window.addEventListener("load", async () => {
@@ -242,12 +257,30 @@
       }
     }
 
+    // ---------- 流式控制（Gate 5 #3：前端取消按钮）----------
+    let currentAbortController = null;
+
+    function cancelStream() {
+      if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+      }
+      const btn = document.getElementById("cancel-btn");
+      if (btn) btn.classList.add("hidden");
+    }
+
     // ---------- 发送消息（流式）----------
     async function sendMessage() {
       const input = document.getElementById("msg-input");
       const msg = input.value.trim();
       if (!msg) return;
       input.value = "";
+      // 取消上一个仍在流的请求
+      cancelStream();
+      currentAbortController = new AbortController();
+      const signal = currentAbortController.signal;
+      const cancelBtn = document.getElementById("cancel-btn");
+      if (cancelBtn) cancelBtn.classList.remove("hidden");
 
       // 用户气泡
       appendBubble("user", msg);
@@ -262,6 +295,7 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
+          signal,  // Gate 5 #3：支持客户端取消
         });
 
         if (!resp.ok) {
@@ -301,7 +335,16 @@
         loadAudit();
       } catch (e) {
         aiBubble.classList.remove("typing");
-        aiBubble.innerHTML = '<span class="text-error">连接失败: ' + e.message + '</span>';
+        if (e.name === "AbortError") {
+          appendMeta(aiBubble, "⏹ 已取消");
+        } else {
+          aiBubble.innerHTML = '<span class="text-error">连接失败: ' + e.message + '</span>';
+        }
+      } finally {
+        // Gate 5 #3：流结束/取消后隐藏取消按钮
+        currentAbortController = null;
+        const btn = document.getElementById("cancel-btn");
+        if (btn) btn.classList.add("hidden");
       }
     }
 
@@ -343,6 +386,13 @@
         if (event.guard_decision) updateGuard(event.guard_decision);
         // 把 run_id 填入 trace 输入框，方便一键查询
         if (event.run_id) document.getElementById("trace-input").value = event.run_id;
+        // §5 Gate 2：收到 approval_required → 渲染审批卡片
+        if (event.approval_required && event.pending_approvals?.length) {
+          pendingApprovals = event.pending_approvals;
+          lastApprovalRunId = event.run_id;
+          lastApprovalThreadId = event.thread_id;
+          renderApprovalCard();
+        }
       }
     }
 
@@ -375,6 +425,56 @@
       const el = document.getElementById("current-guard");
       el.textContent = decision;
       el.className = "badge badge-sm " + (decision === "deny" ? "badge-high" : "badge-low");
+    }
+
+    // ---------- 审批卡片（§5 Gate 2）----------
+    function renderApprovalCard() {
+      const card = document.getElementById("approval-card");
+      const list = document.getElementById("approval-list");
+      const count = document.getElementById("approval-count");
+      count.textContent = pendingApprovals.length;
+      card.classList.remove("hidden");
+      list.innerHTML = pendingApprovals.map(p => `
+        <div class="bg-base-200 rounded p-2 border border-warning/30" id="approval-${p.approval_id}">
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-mono text-warning font-bold">${p.tool_name}</span>
+            <span class="badge badge-warning badge-xs">待决策</span>
+          </div>
+          <div class="text-base-content/60 mb-1">参数: ${escapeHtml(JSON.stringify(p.arguments || {}))}</div>
+          <div class="text-base-content/50 mb-2 text-xs">原因: ${escapeHtml(p.reason || '-')}</div>
+          <div class="flex gap-2">
+            <button class="btn btn-xs btn-success flex-1" onclick="decideApproval('${p.approval_id}','approved')">✅ 批准</button>
+            <button class="btn btn-xs btn-error flex-1" onclick="decideApproval('${p.approval_id}','rejected')">❌ 拒绝</button>
+          </div>
+          <div class="text-xs mt-1 text-info result-msg hidden"></div>
+        </div>
+      `).join("");
+    }
+
+    async function decideApproval(approvalId, decision) {
+      // 1. 调用 approve 或 reject
+      const decideRes = await fetch(API + `/api/approvals/${approvalId}/${decision}`, { method: "POST" });
+      if (!decideRes.ok) {
+        alert("决策失败: " + decideRes.status);
+        return;
+      }
+      // 标记该审批单已决策
+      const el = document.getElementById(`approval-${approvalId}`);
+      if (el) {
+        el.querySelector(".badge").className = "badge badge-xs " + (decision === "approved" ? "badge-success" : "badge-error");
+        el.querySelector(".badge").textContent = decision === "approved" ? "已批准" : "已拒绝";
+        el.querySelectorAll("button").forEach(b => b.disabled = true);
+      }
+      // 2. resume 恢复图执行
+      const resumeRes = await fetch(API + `/api/approvals/${approvalId}/resume`, { method: "POST" });
+      if (resumeRes.ok) {
+        const d = await resumeRes.json();
+        const msg = el?.querySelector(".result-msg");
+        if (msg) {
+          msg.textContent = `结果: ${d.decision} ✓`;
+          msg.classList.remove("hidden");
+        }
+      }
     }
 
     // 极简 Markdown 渲染（代码块 + 行内代码）

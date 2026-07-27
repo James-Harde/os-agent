@@ -1,115 +1,110 @@
-# CLAUDE.md
+# Claude Code Project Rules
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Project Goal
 
-## Project Overview
+`app_v4` is the only active implementation. It is a job-search portfolio for
+Agent, LLM application, and backend roles.
 
-**Kylin Secure OS Agent** — a safety-first intelligent operations agent for Kylin/Linux OS (中国软件杯 A2 赛题). B/S architecture: user inputs natural language → Agent understands intent → calls read-only system tools → returns diagnosis. Protected by dual-layer sandbox (application + OS).
+The project may stay small, but every active capability must use a mainstream,
+maintainable engineering approach. Do not use competition constraints,
+zero-dependency goals, domestic-only substitutions, or hand-written teaching
+implementations as production decisions.
 
-**Target platform**: LoongArch + Kylin Advanced Server V11
-**Deadline**: End of July 2026
+Do not modify `app`, `app_v2`, or `app_v3` unless the user explicitly changes
+the scope. Never read, print, overwrite, or commit secrets from `.env`.
 
-## Build & Run Commands
+## Recovery Path
+
+For every continuing window, read only:
+
+1. `D:\klin-agent\app4-需求清单.md`
+2. `app_v4/docs/WORK-STATE.md`
+3. `app_v4/docs/HANDOFF-LATEST.md`
+4. `git status --short` and the focused Git diff
+
+Then continue from the handoff's next action. Do not restart a full-repository
+audit. `AGENT-CHAIN.md` is the project roadmap, not the per-window execution
+prompt. `INTERVIEW-MARKET.md` is market evidence and is read only when the
+roadmap is recalibrated.
+
+## Current Architecture
+
+- FastAPI is the HTTP boundary.
+- LangGraph `StateGraph` owns state, routing, checkpointing, loops, and HITL.
+- LangChain owns model, message, tool, splitter, embedding, retriever, and
+  vector-store integrations.
+- The outer workflow is deterministic and safety-controlled.
+- Read-only diagnosis uses bounded ReAct.
+- Mutating actions use plan, policy validation, HITL, frozen parameters,
+  execution, and verification.
+- The official MCP SDK is the protocol layer. MCP and `/api/chat` must reuse
+  the same tool policy and audit path.
+
+Model output is an untrusted structured proposal. The orchestration layer must
+validate schema, tool allowlist, arguments, permission, risk, budget, and
+approval before execution.
+
+## Mainstream Component Gate
+
+Before implementing a common capability:
+
+1. Name the problem and whether the project actually needs it.
+2. Identify the mainstream framework or managed component normally used.
+3. Reuse that component unless a concrete constraint prevents it.
+4. If a fallback is necessary, isolate and label it; never make it the
+   production default or PASS evidence.
+5. Remove the superseded custom implementation and obsolete tests after the
+   replacement passes.
+
+Do not repair or extend the old hand-written RAG adapters. The approved target
+is:
+
+- LangChain `Document` and `RecursiveCharacterTextSplitter`
+- a real embedding model configured separately from the chat model
+- Milvus Standalone through Docker Compose
+- Milvus dense retrieval plus built-in BM25 sparse retrieval and RRF fusion
+- source citations and a small versioned retrieval evaluation set
+
+Cross-encoder reranking, query rewriting, parent-child indexing, and other
+optimizations are added only when a measured bad case justifies them.
+
+## Commands
+
+Run from `D:\klin-agent\kylin-os-agent`:
 
 ```powershell
-# Install dependencies
-pip install -r requirements.txt
-
-# Start server (from kylin-os-agent/ directory)
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-
-# Open browser: http://127.0.0.1:8000
-
-# MCP smoke test (separate terminal, server must be running)
-python scripts/mcp_smoke_test.py
+pip install -r requirements-v2.txt
+python -m uvicorn app_v4.main:app --host 127.0.0.1 --port 8000
+python -m pytest app_v4/tests -q -p no:cacheprovider
 ```
 
-**LLM Configuration**: Copy `.env.example` to `.env` and set `OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_API_KEY`, `OPENAI_COMPATIBLE_MODEL`. The adapter calls `{base_url}/chat/completions` via urllib (no OpenAI SDK dependency).
+Use `APP_V4_USE_FAKE_MODEL=true` only for deterministic automated tests.
+Production smoke tests must use explicit real model and embedding
+configuration without exposing credentials.
 
-## Architecture
+## Dependency Installation
 
-### Request Flow (`app/agent/orchestrator.py`)
+- Project-local Python dependencies may be installed into the project `.venv`
+  after checking official compatibility and locking the verified versions.
+- System-level software such as Docker Desktop, WSL, database services, or
+  virtualization features may also be installed when the project needs them,
+  but not silently.
+- Before a system-level installation, report the official source and version,
+  exact commands, disk/service/virtualization/restart impact, and rollback
+  approach. Wait for explicit user approval, then perform and verify the
+  installation.
+- Missing infrastructure is a request-for-approval point, not permission to
+  replace the approved component with an unsupported fallback.
 
-The `AgentOrchestrator.handle()` method is the central pipeline:
+## Change And Evidence Rules
 
-1. **Memory load** — ensure conversation exists, load recent messages from SQLite
-2. **Safety preflight** — `SafetyGuard.preflight_request()` blocks dangerous input before LLM
-3. **LLM plan** — `ModelAdapter.plan()` sends system prompt + available tools to LLM, gets back `{intent, plan:[{tool, arguments, reason}]}`
-4. **Safety assess** — `SafetyGuard.assess_request()` + `assess_plan()` validate the plan
-5. **Tool execution** — loop over plan steps:
-   - `execution_mode=auto` → `ToolRegistry.call()` (only read-only tools pass)
-   - `execution_mode=confirm/deny` → create `ApprovalRequest` (blocked, not executed)
-6. **Output scan** — `SafetyGuard.scan_untrusted_output()` on each tool result
-7. **LLM summarize** — `ModelAdapter.summarize()` generates final Chinese answer
-8. **Audit log** — everything recorded to SQLite
-
-### Module Responsibilities
-
-| Module | Role |
-|--------|------|
-| `app/main.py` | FastAPI app, 8 HTTP endpoints + 1 MCP endpoint + 3 approval endpoints, rate limiting |
-| `app/agent/orchestrator.py` | Pipeline orchestration (preflight → plan → execute → summarize → audit) |
-| `app/model/adapter.py` | OpenAI-compatible LLM client (urllib, no SDK). Handles plan/summarize/explain_denial |
-| `app/safety/guard.py` | Multi-stage safety: preflight, assess_request, assess_plan, scan_untrusted_output, merge |
-| `app/tools/registry.py` | Tool registration + sandbox gate (only `auto+read+read_only` tools execute) |
-| `app/tools/system_tools.py` | 7 auto tools (disk/directory/port/process/log/service/injection) + 2 blocked tools |
-| `app/tools/command_runner.py` | Whitelist-based command executor (shell=False, blocked tokens, shutil.which) |
-| `app/tools/types.py` | `ToolSpec` dataclass — defines tool metadata (risk, permission, execution_mode) |
-| `app/mcp/server.py` | MCP JSON-RPC server (initialize/tools/list/tools/call). Reuses ToolRegistry.call() |
-| `app/mcp/schemas.py` | Pydantic models for JSON-RPC envelope + inputSchema for 7 auto tools |
-| `app/approval/service.py` | SQLite-backed approval lifecycle (pending → approved/rejected) |
-| `app/audit/logger.py` | SQLite audit tables (tool_calls + audit_logs) |
-| `app/memory/store.py` | SQLite conversation memory (conversations + messages tables) |
-| `app/config.py` | Path constants, loads `.env` into os.environ |
-| `app/static/` | Frontend (Tailwind + DaisyUI dark theme) |
-
-### Key Design Decisions
-
-1. **LLM output is never directly executed** — `ToolRegistry.call()` hard-codes the gate: only tools with `execution_mode=auto AND read_only=True AND permission=read` run. The LLM can name any tool; non-auto ones are blocked.
-
-2. **MCP reuses the same execution path** — `MCPServer._tools_call()` funnels through `ToolRegistry.call()`, not a separate path. `tools/list` only exposes auto-mode tools.
-
-3. **SafetyGuard uses Unicode normalization** — `_normalize()` applies NFKC + strips zero-width chars before regex matching, preventing homoglyph/zero-width bypass.
-
-4. **CommandRunner is defense-in-depth** — even though only auto tools call it, it independently enforces: whitelist (9 commands), blocked tokens (25 dangerous words), `shell=False`, `shutil.which` resolution.
-
-5. **All persistence is SQLite** — single `data/audit.db` file with 5 tables. No external database dependency.
-
-### HTTP API Endpoints
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | /api/health | Health check |
-| GET | /api/runtime | Model + sandbox status |
-| GET | /api/tools | List all tool definitions |
-| POST | /api/chat | Submit ops request (rate-limited 10/min) |
-| GET | /api/audit | Query audit logs |
-| GET | /api/conversations | List conversations |
-| GET | /api/conversations/{id}/messages | Message history |
-| POST | /api/mcp | JSON-RPC endpoint |
-| GET | /api/approvals | List approval history |
-| POST | /api/approvals/{id}/approve | Approve |
-| POST | /api/approvals/{id}/reject | Reject |
-
-### Tool Registry (9 tools)
-
-**Auto (read-only, execute immediately)**: `disk_usage`, `directory_usage`, `port_lookup`, `process_list`, `system_logs`, `service_status`, `prompt_injection_scan`
-
-**Confirm (require approval)**: `service_restart`
-**Deny (always blocked)**: `file_delete`
-
-## Project Conventions
-
-- **Language**: Code comments and docstrings are in Chinese. LLM prompts are in Chinese.
-- **No pip install by Agent** — only modify `requirements.txt`, user runs pip manually.
-- **Safety changes** must be recorded in `docs/CHANGELOG-safety.md`.
-- **Learning logs** go in `docs/learning/L{xx}-*.md` with 5-section format (Concept / In Our Code / Why It Matters / Common Pitfalls / Further Reading).
-- **Confirmation gates**: <30 line edits OK to do directly; >30 line edits show diff first; new files show content first.
-
-## Current Status
-
-- Phase 1 (safety hardening) ✅
-- Phase 2 (MCP server) ✅
-- Phase 3 (approval flow) ✅
-- UI rewrite ✅
-- **Remaining**: Phase 4 (automated tests + test report), Phase 5 (demo materials/slides)
+- Keep one production default path.
+- Use dependency injection for external services and test doubles.
+- Do not claim PASS from file existence, mock-only tests, or helper counts.
+- Record real commands, test results, Trace IDs, metrics, and limitations.
+- Keep `WORK-STATE.md` concise and current.
+- Keep `HANDOFF-LATEST.md` as a short recovery capsule with at most three next
+  actions.
+- When context grows large, stop expanding scope, run the smallest meaningful
+  tests, update both state files, and hand off.
+- Delete stale status documents rather than preserving contradictory copies.

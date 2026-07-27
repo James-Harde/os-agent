@@ -31,9 +31,10 @@ def test_stream_emits_preflight_then_answer(client: TestClient):
 
 def test_stream_emits_plan_with_progressive_info(client: TestClient):
     """plan 事件应包含渐进披露元信息（工具 > 5）。"""
-    events = _collect_events(client, "分析磁盘")
+    # 知识查询走 knowledge → plan 路径（渐进披露在 plan_node 中）
+    events = _collect_events(client, "如何查看磁盘使用率")
     plan_events = [e for e in events if e["event"] == "plan"]
-    assert plan_events, "应至少有一个 plan 事件"
+    assert plan_events, f"应至少有一个 plan 事件, 得到 {[e.get('event') for e in events]}"
     plan = plan_events[0]
     assert "intent" in plan
     assert "progressive" in plan  # 渐进披露标志

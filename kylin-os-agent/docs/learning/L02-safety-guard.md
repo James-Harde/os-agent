@@ -106,7 +106,7 @@ for step in plan:
 
 ## Why It Matters
 
-Safety Guard 是整个项目里**最不能省的模块**。如果没有它，项目架构就变成了"用户说的话→LLM→执行 LLM 说的"，完全不可控。评委问你的核心问题之一就是："LLM 输出错了怎么办？"——有 Safety Guard 就能回答："代码会再检查一遍，LLM 说的不算数。"
+Safety Guard 是整个项目里**最不能省的模块**。如果没有它，项目架构就变成了"用户说的话→LLM→执行 LLM 说的"，完全不可控。面试官会追问："LLM 输出错了怎么办？"——有 Safety Guard 才能回答："代码会再检查一遍，LLM 说的不算数。"
 
 ## Common Pitfalls
 

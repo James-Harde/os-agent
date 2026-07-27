@@ -90,9 +90,9 @@ def mcp_endpoint(body: JSONRPCRequest) -> dict:
 
 ## Why It Matters
 
-评委和 PRD 都强调 MCP。原因：
+面试和工业化 Agent 工程都强调 MCP。原因：
 
-1. **标准化**：官方赛题要求"参考并实现 MCP 协议"。不写 MCP 协议直接硬编码是走不远的——评委知道真正的 MCP 应该支持 Any Client 即插即用
+1. **标准化**：MCP 是模型/Agent 与外部工具、资源、服务解耦的协议层。不写 MCP 协议而直接硬编码工具调用，后续很难支持 Any Client 即插即用
 2. **解耦**：前端 Agent、MCP Server、工具实现被协议隔开，修改一边不影响另一边
 3. **可扩展**：未来想做多主机监控？加一台 MCP Server Agent 通过 JSON-RPC 连进来就行
 

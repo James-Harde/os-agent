@@ -92,7 +92,7 @@
 
 ---
 
-## Phase 2 — MCP Server（P0，PRD 最大缺口）
+## Phase 2 — MCP Server（历史 P0，协议层缺口）
 
 ### [2026-07-12 任务 2.1] MCP schema 数据模型
 

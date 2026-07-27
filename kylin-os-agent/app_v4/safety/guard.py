@@ -38,17 +38,42 @@ class SafetyGuard:
     UNTRUSTED_MARKERS = ["这段", "以下", "日志：", "日志:", "log:", "log："]
 
     def check_input(self, user_input: str) -> dict[str, Any]:
-        """检查用户输入。"""
+        """检查用户输入。
+
+        返回显式证据字段（untrusted_data / prompt_injection_detected / reason_code），
+        即使分析语境把 risk_level 降为 low，这些证据仍保留，供审计与黑盒断言。
+        """
         high_risk = self._detect(self.HIGH_RISK_PATTERNS, user_input)
         injection = self._detect(self.PROMPT_INJECTION_PATTERNS, user_input)
         is_analysis = self._is_analysis_context(user_input)
 
-        # 分析语境：高危文本作为数据不进执行路径
+        # 显式证据：只要检测到注入模式即标记，不因分析语境而抹除。
+        prompt_injection_detected = bool(injection)
+        # 不可信数据：输入含不可信标记（UNTRUSTED_MARKERS）且含高危/注入文本。
+        untrusted_data = is_analysis and (bool(high_risk) or prompt_injection_detected)
+
+        # 稳定原因码（供黑盒测试断言，不依赖具体文案）。
+        if prompt_injection_detected and untrusted_data:
+            reason_code = "untrusted_data.prompt_injection_detected"
+        elif prompt_injection_detected:
+            reason_code = "prompt_injection_detected"
+        elif untrusted_data:
+            reason_code = "untrusted_data"
+        elif high_risk:
+            reason_code = "high_risk_command"
+        else:
+            reason_code = "clean"
+
+        # 分析语境：高危文本作为数据不进执行路径（risk_level 降为 low），
+        # 但证据字段仍保留，后续节点不得覆盖。
         if is_analysis and (high_risk or injection):
             return {
                 "risk_level": "low",
                 "reasons": ["输入包含高危文本，但语境为分析不可信数据，不作为命令执行"],
                 "is_analysis_context": True,
+                "untrusted_data": untrusted_data,
+                "prompt_injection_detected": prompt_injection_detected,
+                "reason_code": reason_code,
             }
 
         reasons = high_risk + injection
@@ -56,6 +81,9 @@ class SafetyGuard:
             "risk_level": "high" if reasons else "low",
             "reasons": reasons or ["未命中高危规则"],
             "is_analysis_context": False,
+            "untrusted_data": untrusted_data,
+            "prompt_injection_detected": prompt_injection_detected,
+            "reason_code": reason_code,
         }
 
     def check_plan(self, plan: list[dict], allowed_tool_names: set[str]) -> dict[str, Any]:

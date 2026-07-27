@@ -15,12 +15,14 @@ from pathlib import Path
 from typing import Any
 
 
-DB_PATH = Path(__file__).resolve().parents[2] / "data" / "agent_v4.db"
+# 默认路径（向后兼容）；测试通过 db_path 参数注入临时库
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "agent_v4.db"
 
 
 class AuditLogger:
-    def __init__(self) -> None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        self._db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def record(self, conversation_id: str, result: dict[str, Any]) -> None:
@@ -47,10 +49,15 @@ class AuditLogger:
             )
 
     def get_trace(self, run_id: str) -> dict[str, Any] | None:
-        """按 run_id 查询单次 Run 的完整记录。"""
+        """按 run_id 查询单次 Run 的最新记录。
+
+        resume 会按同一 run_id 写入最终 Trace，因此取 id 最大（最新）的一条，
+        避免永远返回 pending 阶段的旧记录。
+        """
         with self._connect() as conn:
             row = conn.execute(
-                "select * from audit_logs where run_id = ?", (run_id,)
+                "select * from audit_logs where run_id = ? order by id desc limit 1",
+                (run_id,),
             ).fetchone()
         if not row:
             return None
@@ -89,17 +96,12 @@ class AuditLogger:
             """)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
 
 
-# 单例
-_logger: AuditLogger | None = None
-
-
+# 向后兼容的单例入口：路由到当前活动容器（测试注入 / 生产默认）
 def get_audit_logger() -> AuditLogger:
-    global _logger
-    if _logger is None:
-        _logger = AuditLogger()
-    return _logger
+    from app_v4.container import get_deps
+    return get_deps().audit_logger

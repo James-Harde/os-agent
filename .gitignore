@@ -1,0 +1,31 @@
+# 环境配置（含 secret，不得入库）
+.env
+*.env
+!.env.example
+
+# app_v4 运行时数据库（生产/sidecar，体积大且含运行时状态）
+kylin-os-agent/app_v4/data/*.db
+kylin-os-agent/app_v4/data/*.sqlite
+kylin-os-agent/app_v4/data/*.sqlite3
+kylin-os-agent/app_v4/data/sidecar/
+kylin-os-agent/app_v4/data/*_db/
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 测试临时产物
+.pytest_cache/
+pytest-tmp-*/
+__pycache__/
+*.pyc
+.pytest-audit-*/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 编辑器 / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

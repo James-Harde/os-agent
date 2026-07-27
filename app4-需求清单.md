@@ -1,8 +1,42 @@
 # app_4 成品需求清单
 
-> 基线：app_v2（LangGraph 骨架）方向正确，目标是把它填成**可运行、可面试讲解的成品**。
-> 这不是比赛项目，是找 Agent / LLM 应用 / 后端岗位的作品证据。
-> 完成标准不是代码存在，而是能跑通、能讲清设计、能回答面试高频追问。
+> 基线：app_v2（LangGraph 骨架）方向正确，目标是把它填成**可运行、可面试讲解、采用业界主流工程方法的求职作品**。
+> 这不是比赛项目，也不是零依赖玩具 demo；它服务于 Agent / LLM 应用 / 后端岗位求职。
+> 完成标准不是代码存在，而是能跑通、能讲清设计、能回答面试高频追问，并且通用关键能力必须优先采用成熟主流框架、服务或库。
+> 手写替代只能作为明确标注的 fallback / learning baseline，不能冒充工业级 PASS。
+
+---
+
+## 零、不可降低的工程基线
+
+1. **求职导向**：项目服务 Agent / LLM 应用开发岗位。允许 Demo 规模，但代码组织、组件选型、接口契约、状态管理、安全、测试、可观测性和部署方式必须采用真实项目中的主流工程做法；不再受比赛、零依赖、国产化或教学手搓约束，也不纳入模型训练、vLLM/Triton 等 AI Infra 范围。
+2. **继续修复 app_v4**：默认不创建 app_v5。正式修复前必须依据实际代码、真实主路径和测试完成可修复性审核；只有核心状态模型或多数核心模块不可复用时，才报告重建证据并等待人工决定。
+3. **混合 Agent 架构**：固定 LangGraph StateGraph 作为外层受控 Workflow；普通咨询直接回答，知识查询走真实 RAG，只读诊断走 bounded ReAct，副作用操作走 Plan → 安全审核 → HITL → 冻结参数执行 → 验证。
+4. **认知与编排边界**：LLM 生成的 plan/tool_calls 一律视为不可信的待执行请求；执行前必须由编排层完成 Schema、工具白名单、参数、权限、风险、预算和审批检查，任何模型输出都不能直接触发副作用。一次规划、批量执行、一次总结不能冒充 ReAct。
+5. **LangGraph + LangChain**：LangGraph 管理状态、循环、checkpoint 和 HITL；LangChain 提供 Model、Message、Tool、Retriever、Splitter、Embedding、VectorStore 等接口与生态集成；项目只自定义业务状态、安全策略、审批规则、审计模型和停止条件。
+6. **成熟组件优先并清理旧实现**：通用能力不得为了展示原理重复手写。手写 BM25、TF-IDF、SVD/LSA、字符串 query rewrite、覆盖率伪 rerank 等只能作为明确标注的 fallback / baseline / test double，不能成为默认主路径或工业级 PASS。主流实现替换完成并通过测试后，应删除已经无用途的非工业级实现、重复适配层、失效测试和过期文档，避免新旧两套路径长期并存；不得删除仍被真实主路径、有效测试或用户工作依赖的内容。
+7. **真实协议与数据**：真实系统工具必须返回真实数据，不支持时返回结构化 unavailable/error；MCP 使用官方 SDK，且至少一条 `/api/chat` 默认主路径真实经过 MCP Client → MCP Server → 统一安全与审计。
+8. **工程质量**：FastAPI 接口契约、配置和密钥保护、依赖注入、lifespan、async 阻塞边界、thread 隔离、checkpoint、HITL 幂等、SSE 取消/背压、结构化日志、Trace、错误分类和 Docker Compose 必须按真实后端工程方式审核与实现。
+9. **证据而非功能清单**：每项 PASS 必须有真实代码路径和可复现测试、Trace、指标或 Badcase；测试区分 unit / integration / e2e / real-model smoke。不得用 FakeModel、helper 数量、文件存在或文档声明冒充完成，也不得编造生产规模和业务指标。
+10. **控制复杂度**：采用最小且连贯的 `FastAPI + LangGraph + LangChain + 官方 MCP + 真实 RAG + Trace/Eval + Docker Compose` 组合。数据库、Redis 和向量库按真实需求选择；multi-agent、Deep Agents、Skills 只有在场景和评测证明必要时才引入。
+
+### 分窗口执行协议
+
+- 详细标准只保存在本文件，目标模式提示词不得重复粘贴整份标准。
+- 审核与修复分开：先完成只读审核并等待人工确认，再按一条纵向链路修复。
+- 每个上下文窗口只处理可在当前窗口内闭环的一部分，不要求一次完成全仓审核或全部修复。
+- 持续维护当前 TODO。上下文明显接近上限时，立即停止扩大范围，不得硬撑到窗口耗尽。
+- 停止前运行当前已具备条件的测试，并更新 `WORK-STATE.md` 与 `HANDOFF-LATEST.md`；未运行的测试必须如实记录。
+- `HANDOFF-LATEST.md` 只保留最新短交接：已完成、当前结论、下一步、相关文件、测试命令与结果、关键决策、阻塞和风险。
+- 下一窗口 `clear` 后先读本文件、`WORK-STATE.md`、`HANDOFF-LATEST.md` 和当前 Git diff，只从“下一步”继续；不得重复已经完成的全仓扫描。
+
+### 删除与收敛闸门
+
+- 只读审核阶段只能列出删除候选，不得实际删除代码或文件。
+- 修复阶段如需删除，必须先向用户列出精确文件/符号、冗余原因、引用检查结果、替代实现和相关测试，等待用户确认。
+- 只允许删除与目标无关、确认重复、已经被主流实现完整替代或明确属于旧非工业级主路径的内容。
+- 删除后必须检查残留 import、配置、路由、测试和文档引用，并运行受影响测试；不得以“清理”为名删除有效测试、用户文件、审计证据或尚未迁移的功能。
+- 最终目录只保留一条清晰默认主路径；确有价值的 fallback/test double 必须隔离、明确命名且不能在生产默认配置启用。
 
 ---
 
@@ -26,11 +60,12 @@
 | 模块 | 要有东西 | 面试时可讲 |
 |---|---|---|
 | `/api/chat` 端点 | 接收自然语言，返回结论 + 执行链路 | "一次请求经过哪些节点" |
+| 模型决策 | 使用 Tool Calling / structured output 产生待校验的 action 或 tool_calls，不用关键词硬编码或正则截取 Markdown JSON 冒充模型决策 | 模型决策与执行授权为什么分离 |
 | 真实只读工具 | `disk_usage`、`process_list`、`port_lookup` 等返回**真实系统数据**，不能伪造 | 工具契约、数据来源 |
 | 对话隔离 | 每个会话独立 `thread_id`，不同会话不串消息，并发安全 | 多轮追问、状态隔离 |
 | Trace | 每次 Run 记录节点流转、工具调用、耗时、状态变化 | "一个 Badcase 你怎么定位到具体哪个环节" |
 | 自动化测试 | pytest 覆盖正常咨询、工具调用、高危拒绝、工具失败、注入场景 | 工程可信度 |
-| 框架对比 | 手写 LangGraph vs 现代 `create_agent` 薄对比记录 | "为什么选 LangGraph 而不是 `create_agent`" |
+| 框架对比 | 自定义 LangGraph StateGraph vs 现代 `create_agent` 薄对比记录 | "为什么选 LangGraph 而不是 `create_agent`" |
 
 **验收标准**：
 - [ ] 输入"帮我分析磁盘"，Agent 调用真实磁盘工具并返回真实数据
@@ -43,7 +78,7 @@
 
 ## 三、P0 — 安全护栏（V3 纵切）
 
-**目标**：对 PRD 要求的高危拒绝、中危审批、注入防护形成可演示证据。
+**目标**：对求职作品需要讲清的高危拒绝、中危审批、注入防护形成可演示证据。
 
 | 模块 | 要有东西 | 面试时可讲 |
 |---|---|---|
@@ -78,21 +113,23 @@
 
 ## 五、P1 — RAG 检索
 
-**目标**：RAG 全链可跑通，有评测数据支撑。
+**目标**：先以最小主流组件链跑通真实 RAG，再根据评测 Badcase 增加复杂度。
 
 | 模块 | 要有东西 | 面试时可讲 |
 |---|---|---|
-| 文档切分 | chunk 大小、重叠、父子索引 | chunk 怎么选、为什么不是越大越好 |
-| 混合召回 | BM25（稀疏）+ 向量（稠密）双路召回 | 为什么同时用两种检索 |
-| Rerank | 重排 + top-k 截断 | rerank 的目的、截断值怎么定 |
-| 查询改写 | 多轮查询改写 vs 保留原查询的取舍 | 改写什么时候会伤害召回 |
-| 评测数据集 | 20-30 条版本化样本，含查询、相关文档标注 | 数据集怎么构建、怎么避免污染 |
+| 文档切分 | 使用 LangChain `Document` 与 `RecursiveCharacterTextSplitter`，保留 source、document_id、chunk_id 等元数据 | chunk 怎么选、为什么不是越大越好 |
+| 向量检索 | 使用独立配置的真实神经 Embedding + Docker Compose 中的 Milvus Standalone 建立持久化 ANN 索引 | 谁负责生成向量、谁负责建索引和检索 |
+| 混合召回 | 使用 Milvus dense retrieval + 内置 BM25 sparse retrieval + RRF 融合 | 为什么同时用稀疏和稠密检索 |
+| 可选优化 | cross-encoder Rerank、query rewrite、父子索引只有在评测 Badcase 证明需要时再加入 | 为什么没有一开始堆满所有 RAG 技术 |
+| 评测数据集 | 版本化 corpus/query/qrels；规模只需支撑当前运维知识场景，但必须能暴露字面与语义召回差异 | 数据集怎么构建、怎么避免污染与虚高指标 |
 | 检索指标 | Recall@k、MRR 或 nDCG | 指标含义、优化方向 |
 
 **验收标准**：
 - [ ] RAG 查询返回带来源引用的结果
 - [ ] 能跑评测集并输出检索指标
-- [ ] 至少一个 Badcase 的改进前后对比（切片问题 → 优化 → 指标提升）
+- [ ] 至少一个真实、可复现的 Badcase 改进前后对比；后续按实际失败类型积累
+- [ ] 默认主路径不使用手写 BM25、TF-IDF、SVD/LSA、字符串同义词替换或覆盖率乘分伪 Rerank
+- [ ] 第一条主路径未证明需要时，不强制加入 Rerank、query rewrite 或父子索引
 
 ---
 
@@ -136,22 +173,20 @@
 
 ## 八、当前状态
 
-> **app_v2 骨架存在，但 17 条链路全部"待开始"，0 条验收通过。**
-> 面试最高频的 RAG、MCP 协议层、评测回归、记忆管理、性能工程目前**完全没有代码**。
-> app_4 要做的是把这些缺口一条条填成可运行、可讲解的证据。
+> 本文件只定义目标和验收标准，不记录易过期的完成数量。
+> 当前进度唯一真相源为 `app_v4/docs/WORK-STATE.md`，最新窗口续跑入口为 `app_v4/docs/HANDOFF-LATEST.md`。
+> 旧 PASS 必须接受真实主路径复审；代码存在不代表达到本文件的工程标准。
 
 ---
 
-## 九、建议推进顺序
+## 九、推进顺序
 
-```
-第1周  V0+V1  跑通 /api/chat + 真实只读工具 + thread 隔离 + Trace + 自动化测试
-第2周  V3     安全护栏：审批恢复 + 注入防护 + 权限模型
-第3周  MCP + RAG 最小链：MCP Server/Client + 混合检索 + rerank + 评测集
-第4周  性能 + 记忆 + 评测深化：SSE/限流/熔断 + 长短记忆 + Badcase 回归
-```
+1. 从 `WORK-STATE.md` 和 `HANDOFF-LATEST.md` 读取当前结论，只对下一条纵向链路做必要的聚焦复核。
+2. 每条链路完成实现、测试、Trace/指标和交接后再进入下一条。
+3. 优先顺序原则：真实 Agent 行为与安全边界 → 真实 MCP 主路径 → 真实 RAG 与评测 → SSE/性能 → 记忆与上下文 → 部署和面试证据收口。
+4. 不以固定周数或一次上下文为完成边界，以可复现验收证据为边界。
 
 ---
 
-生成时间：2026-07-18
-基线文档：os-agent-prd-final.md、AGENT-CHAIN.md、INTERVIEW-MARKET.md、v1 vs v2.md
+生成时间：2026-07-18；工程基线校准：2026-07-22
+当前主基线：AGENTS.md、AGENT-CHAIN.md、INTERVIEW-MARKET.md、app_v4/docs/WORK-STATE.md、app_v4/docs/HANDOFF-LATEST.md、app_v4/docs/FINAL-ACCEPTANCE-MATRIX.md

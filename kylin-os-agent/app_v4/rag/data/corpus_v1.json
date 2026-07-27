@@ -1,0 +1,18 @@
+{
+  "version": "corpus_v1",
+  "description": "麒麟 OS 运维知识库语料（与 queries/qrels 分离）",
+  "documents": [
+    {"id": "doc-01", "source": "faq-disk", "text": "磁盘使用率可以通过 df -h 命令查看，显示每个分区的已用和可用空间百分比。当磁盘将满时，可用 du -sh /* 逐层排查大目录。"},
+    {"id": "doc-02", "source": "faq-proc", "text": "查看 CPU 占用最高的进程推荐使用 top 命令，按 P 键按 CPU 排序，或使用 ps aux --sort=-%cpu | head -20。"},
+    {"id": "doc-03", "source": "faq-port", "text": "查询端口占用可用 ss -ltnp | grep 8080 或 netstat -ano | grep 8080 查看对应进程。"},
+    {"id": "doc-04", "source": "faq-log", "text": "系统错误日志可用 journalctl -p warning..alert 查看 warning 及以上级别，也可查看 /var/log/syslog 或 /var/log/messages。"},
+    {"id": "doc-05", "source": "faq-service", "text": "systemctl restart 等写操作需要 root 权限，普通用户需通过 sudo 提权或加入 systemctl 组。重启服务前建议先 systemctl status 确认状态。"},
+    {"id": "doc-06", "source": "faq-net", "text": "排查网络延迟先用 ping 测 RTT，再用 traceroute 定位跳点，最后用 mtr 持续观测丢包和延迟抖动。"},
+    {"id": "doc-07", "source": "faq-injection", "text": "提示词注入是指攻击者在工具输出或文档中植入伪装指令，诱导 LLM 忽略原有规则执行恶意命令。防范手段包括输出扫描和指令隔离。"},
+    {"id": "doc-08", "source": "faq-readonly", "text": "disk_usage、process_list、port_lookup、system_logs、service_status 等只读工具会自动执行，不会修改系统状态。可变更操作需人工审批。"},
+    {"id": "doc-09", "source": "faq-security", "text": "安全运维 Agent 使用双层沙箱（应用层 + OS 层）防护。rm -rf、chmod 777、mkfs 等高危命令会被 safety guard 自动拒绝。"},
+    {"id": "doc-10", "source": "faq-mem", "text": "查看内存使用可用 free -h 显示总量/已用/缓存，vmstat 1 持续监控，ps aux --sort=-%mem 找出最占内存的进程。"},
+    {"id": "doc-11", "source": "faq-ssh", "text": "SSH 连接失败时，先 systemctl status sshd 检查服务，再查 /var/log/auth.log 看握手失败原因，最后确认防火墙是否放行 22 端口。"},
+    {"id": "doc-12", "source": "faq-update", "text": "系统更新用 apt update && apt upgrade（Debian/Ubuntu）或 dnf update（Fedora/CentOS）。更新前建议备份关键数据。"}
+  ]
+}

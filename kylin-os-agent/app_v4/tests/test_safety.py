@@ -131,3 +131,72 @@ def test_output_guard_blocks_malicious_answer():
     normal = "磁盘使用率正常，建议持续监控。"
     result = guard.scan_final_answer(normal)
     assert result["detected"] is False
+
+
+# ---------------------------------------------------------------------------
+# Phase C 回归测试：HITL 审批恢复（audit #5）
+# ---------------------------------------------------------------------------
+def test_approve_then_resume(client: TestClient):
+    """批准 → resume 应返回 approved 决策并恢复图（修复 audit #5）。"""
+    from app_v4.approval.store import get_approval_store
+    store = get_approval_store()
+    aid = store.create('run-1', 'thread-1', 'service_restart',
+                       {'service': 'sshd'}, '测试批准')
+
+    # 批准
+    resp = client.post(f'/api/approvals/{aid}/approve')
+    assert resp.status_code == 200
+    assert resp.json()['approval']['status'] == 'approved'
+
+    # 恢复
+    resp = client.post(f'/api/approvals/{aid}/resume')
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['decision'] == 'approved'
+    assert data['status'] == 'ok'
+
+
+def test_reject_then_resume(client: TestClient):
+    """拒绝 → resume 应返回 rejected 决策，不执行工具。"""
+    from app_v4.approval.store import get_approval_store
+    store = get_approval_store()
+    aid = store.create('run-2', 'thread-2', 'service_restart',
+                       {'service': 'nginx'}, '测试拒绝')
+
+    # 拒绝
+    resp = client.post(f'/api/approvals/{aid}/reject')
+    assert resp.status_code == 200
+    assert resp.json()['approval']['status'] == 'rejected'
+
+    # 恢复
+    resp = client.post(f'/api/approvals/{aid}/resume')
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['decision'] == 'rejected'
+
+
+def test_resume_idempotent(client: TestClient):
+    """重复 resume 应幂等（不报错）。"""
+    from app_v4.approval.store import get_approval_store
+    store = get_approval_store()
+    aid = store.create('run-3', 'thread-3', 'service_restart',
+                       {'service': 'test'}, '测试幂等')
+
+    client.post(f'/api/approvals/{aid}/approve')
+    # 第一次 resume
+    resp1 = client.post(f'/api/approvals/{aid}/resume')
+    assert resp1.status_code == 200
+    # 第二次 resume（幂等）
+    resp2 = client.post(f'/api/approvals/{aid}/resume')
+    assert resp2.status_code == 200
+
+
+def test_resume_pending_approval_returns_400(client: TestClient):
+    """未审批的 resume 应返回 400。"""
+    from app_v4.approval.store import get_approval_store
+    store = get_approval_store()
+    aid = store.create('run-4', 'thread-4', 'service_restart',
+                       {'service': 'test'}, '未审批')
+
+    resp = client.post(f'/api/approvals/{aid}/resume')
+    assert resp.status_code == 400

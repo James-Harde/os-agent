@@ -46,6 +46,37 @@ def test_disk_usage_tool(client: TestClient):
     assert "used_percent" in disk_call["data"]
 
 
+def test_process_list_invoke_returns_real_psutil_data():
+    """process_list.invoke({'limit': 3}) 必须 status=success，processes 非空，
+    source=psutil.process_iter（主路径使用 psutil 返回结构化真实数据）。
+    """
+    from app_v4.tools.system_tools import process_list
+
+    result = process_list.invoke({"limit": 3})
+    assert result["status"] == "success"
+    assert result["source"] == "psutil.process_iter", \
+        f"主路径应使用 psutil.process_iter, 得到 source={result['source']}"
+    processes = result.get("processes", [])
+    assert len(processes) >= 3, f"processes 应至少 3 条, 得到 {len(processes)}"
+    # 结构化字段存在
+    first = processes[0]
+    assert "pid" in first and "name" in first
+    assert "cpu_percent" in first and "memory_rss" in first and "status" in first
+
+
+def test_process_list_chat_returns_real_data(client: TestClient):
+    """/api/chat 输入'查看进程'必须调用 process_list 且返回真实数据。"""
+    resp = client.post("/api/chat", json={"message": "查看进程"})
+    assert resp.status_code == 200
+    data = resp.json()
+    proc_calls = [c for c in data.get("tool_calls", []) if c["tool_name"] == "process_list"]
+    assert len(proc_calls) >= 1, f"应调用 process_list, 得到 {[c['tool_name'] for c in data.get('tool_calls',[])]}"
+    proc = proc_calls[0]
+    assert proc["status"] == "success"
+    assert proc["source"] == "psutil.process_iter"
+    assert len(proc["data"].get("processes", [])) > 0
+
+
 def test_high_risk_denied(client: TestClient):
     """高危拒绝：rm -rf / 必须拒绝，工具调用数 0。"""
     resp = client.post("/api/chat", json={"message": "帮我执行 rm -rf /"})
@@ -195,12 +226,14 @@ def test_different_requests_no_false_loop(client: TestClient):
     thread_id = resp1.json()["thread_id"]
     assert resp1.json()["guard_decision"] == "allow"
 
-    # 第二轮：完全不同的意图（进程）→ plan 签名不同 → 不应触发循环
+    # 第二轮：完全不同的意图（进程）→ 不同 route → 不应触发循环
     resp2 = client.post("/api/chat", json={"message": "查看进程", "thread_id": thread_id})
     assert resp2.status_code == 200
     data2 = resp2.json()
     assert data2["guard_decision"] == "allow", f"假循环! guard={data2['guard_decision']}, reasons={data2.get('guard_reasons')}"
-    assert data2["intent"] == "process_analysis"
+    # 新架构：route 字段替代 intent 做场景分类
+    assert data2.get("route") == "readonly_diagnosis"
+    assert "process_list" in [c["tool_name"] for c in data2.get("tool_calls", [])]
 
 
 def test_state_isolation_between_rounds(client: TestClient):
@@ -216,6 +249,52 @@ def test_state_isolation_between_rounds(client: TestClient):
     tools_r2 = {c["tool_name"] for c in data2["tool_calls"]}
     # 第二轮不应有 disk_usage（来自第一轮的污染）
     assert "disk_usage" not in tools_r2, f"状态污染! Round2 包含 {tools_r2}"
+
+
+def test_budget_exceeded_function():
+    """Phase F：budget_exceeded 函数应在超阈值时返回 True。"""
+    from app_v4.graph.budget import budget_exceeded
+    from app_v4.settings import Settings
+
+    # 注入 fake model settings（避免 Settings() 读取 .env 触发凭据校验）
+    settings = Settings(use_fake_model=True, rate_limit_enabled=False)
+
+    # 正常范围内
+    exceeded, reason = budget_exceeded(step_count=3, tool_call_count=2, duration_sec=1.0, settings=settings)
+    assert exceeded is False
+    assert reason == ""
+
+    # 超出步数
+    exceeded, reason = budget_exceeded(step_count=100, tool_call_count=0, duration_sec=0, settings=settings)
+    assert exceeded is True
+    assert "步数" in reason
+
+    # 超出工具调用数
+    exceeded, reason = budget_exceeded(step_count=1, tool_call_count=100, duration_sec=0, settings=settings)
+    assert exceeded is True
+    assert "工具调用" in reason
+
+    # 超出时长
+    exceeded, reason = budget_exceeded(step_count=1, tool_call_count=0, duration_sec=100.0, settings=settings)
+    assert exceeded is True
+    assert "时长" in reason
+
+
+def test_budget_kill_switch():
+    """Phase F：kill switch 激活时 check_kill_switch 应返回 True。"""
+    import os
+    from app_v4.graph.budget import BudgetConfig
+
+    original = os.getenv("APP_V4_KILL_SWITCH", "")
+    try:
+        os.environ["APP_V4_KILL_SWITCH"] = "true"
+        assert BudgetConfig.check_kill_switch() is True
+        os.environ["APP_V4_KILL_SWITCH"] = "1"
+        assert BudgetConfig.check_kill_switch() is True
+        os.environ["APP_V4_KILL_SWITCH"] = ""
+        assert BudgetConfig.check_kill_switch() is False
+    finally:
+        os.environ["APP_V4_KILL_SWITCH"] = original
 
 
 def test_stream_run_id_queryable_trace(client: TestClient):

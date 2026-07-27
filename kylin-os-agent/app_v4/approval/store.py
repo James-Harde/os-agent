@@ -15,12 +15,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DB_PATH = Path(__file__).resolve().parents[2] / "data" / "agent_v4.db"
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "agent_v4.db"
 
 
 class ApprovalStore:
-    def __init__(self) -> None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        self._db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def create(
@@ -31,8 +32,21 @@ class ApprovalStore:
         arguments: dict[str, Any],
         reason: str,
         risk_level: str = "medium",
+        *,
+        idempotency_key: str | None = None,
     ) -> str:
-        """创建审批单。返回 approval_id。"""
+        """创建审批单。返回 approval_id。
+
+        §5 Gate 2：审批 ID 必须由稳定幂等键创建。
+        若提供 idempotency_key，先查找是否已存在相同键的审批单：
+          - 存在则直接返回其 id（恢复时不创建第二个）
+          - 不存在则创建，并把 idempotency_key 存入 record
+        """
+        if idempotency_key:
+            existing = self.get_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                return existing["id"]
+
         approval_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
@@ -40,13 +54,14 @@ class ApprovalStore:
                 """
                 insert into approvals
                 (id, run_id, thread_id, tool_name, arguments_json,
-                 reason, risk_level, status, created_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 reason, risk_level, status, created_at, idempotency_key)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     approval_id, run_id, thread_id, tool_name,
                     json.dumps(arguments, ensure_ascii=False),
                     reason, risk_level, "pending", now,
+                    idempotency_key or None,
                 ),
             )
         return approval_id
@@ -73,6 +88,18 @@ class ApprovalStore:
         with self._connect() as conn:
             row = conn.execute(
                 "select * from approvals where id = ?", (approval_id,)
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["arguments"] = json.loads(d.get("arguments_json", "{}"))
+        return d
+
+    def get_by_idempotency_key(self, key: str) -> dict[str, Any] | None:
+        """按幂等键查找审批单（恢复时复用同一 ID）。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "select * from approvals where idempotency_key = ?", (key,)
             ).fetchone()
         if not row:
             return None
@@ -123,21 +150,26 @@ class ApprovalStore:
                     risk_level text not null,
                     status text not null,
                     created_at text not null,
-                    decided_at text
+                    decided_at text,
+                    idempotency_key text
                 )
+            """)
+            # 迁移：旧表无 idempotency_key 列时自动添加
+            cols = [row[1] for row in conn.execute("pragma table_info(approvals)").fetchall()]
+            if "idempotency_key" not in cols:
+                conn.execute("alter table approvals add column idempotency_key text")
+            conn.execute("""
+                create unique index if not exists idx_approvals_idempotency
+                on approvals (idempotency_key) where idempotency_key is not null
             """)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
 
 
-_store: ApprovalStore | None = None
-
-
 def get_approval_store() -> ApprovalStore:
-    global _store
-    if _store is None:
-        _store = ApprovalStore()
-    return _store
+    """向后兼容入口：路由到当前活动容器。"""
+    from app_v4.container import get_deps
+    return get_deps().approval_store

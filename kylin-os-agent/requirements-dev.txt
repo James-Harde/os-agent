@@ -1,0 +1,13 @@
+# Kylin Secure OS Agent v4 — 测试与开发依赖
+# 与 requirements-v2.txt 配套使用：先装 requirements-v2.txt，再装本文件
+
+# 测试框架
+pytest==8.4.2
+pytest-asyncio==0.26.0
+pytest-xdist==3.8.0
+
+# FastAPI TestClient 需要 httpx（已在 requirements-v2 中声明，此处重申版本）
+httpx==0.28.1
+
+# 真实系统工具库（跨平台磁盘/进程/端口，替代命令解析）
+psutil==7.1.3
