@@ -1,6 +1,6 @@
 # app_v4 Acceptance Matrix
 
-Updated: 2026-07-26
+Updated: 2026-07-28 (MCP repair verified)
 
 Status meanings:
 
@@ -15,8 +15,8 @@ Status meanings:
 | Agent main path | MOSTLY COMPLETE | FastAPI entry, LangGraph routing, real read-only tools, bounded ReAct, thread isolation, Trace, focused and black-box tests | final real-model smoke and user walkthrough |
 | Safety preflight | MOSTLY COMPLETE | dangerous execution denial, analysis-context distinction, injection scanning, zero-tool-call rejection tests | final scenario demonstration |
 | Tool policy and HITL | MOSTLY COMPLETE | auto/confirm/deny, LangGraph interrupt/resume, approval API, audit, duplicate-resume tests | real approved adapter demonstration without unsafe host changes |
-| Official MCP | PARTIAL | FastMCP server, official client session, streamable HTTP integration tests | make one production `/api/chat` path use MCP by default and remove duplicate legacy path |
-| RAG | NOT ACCEPTED | custom PyMilvus path passes Fake-Embedding Lite tests only; Docker/real Embedding not run and `.venv` cannot import the new stack | official LangChain Milvus integration, compatible versions, Standalone fail-fast, Chinese analyzer, DI, idempotent ingestion, real smoke, citations and metrics |
+| Official MCP | MOSTLY COMPLETE | official FastMCP + Streamable HTTP; external list/call; configured `/api/chat`→MCP→real disk_usage E2E; legacy path removed; production fail-fast when MCP_SERVER_URL empty; structured annotations+meta (permission/risk_level); known-tool isError; auto tools unified via ToolApplicationService; injection blocked + audited (0 executions, +1 audit); unique invocation ID per call; MCP audit shares injectable AuditLogger with Agent; mutation tools not exposed (least privilege) | real-model production smoke with MCP_SERVER_URL configured |
+| RAG | PARTIAL | real Ollama Embedding, Docker Milvus Standalone, dense + built-in BM25 + RRF, citations, idempotent ingest, real E2E | versioned retrieval evaluation, Recall@k plus MRR/nDCG, and one measured reproducible Badcase |
 | SSE and TTFT | PARTIAL | SSE endpoint, model stream events, TTFT fields, regression tests | prove disconnect cancels underlying work and document backpressure behavior |
 | Rate limit/cache/budget | PARTIAL | token bucket, tool cache, step/tool/time budgets, repeat/no-progress guards, kill switch tests | measured behavior and clear production boundaries |
 | Memory/context | PARTIAL | SQLite checkpoint, thread/user isolation, TTL and compression foundations | memory pollution/correction scenario and user explanation |
@@ -26,18 +26,22 @@ Status meanings:
 
 ## Current Blocking Order
 
-1. Milvus RAG vertical slice.
-2. MCP production-path consolidation.
-3. SSE cancellation/backpressure.
-4. Docker Compose and final smoke tests.
+1. Verify real-model production smoke with MCP_SERVER_URL configured (MCP now passes automated acceptance).
+2. SSE cancellation/backpressure.
+3. RAG evaluation and measured Badcase.
+4. Docker Compose application/readiness and final smoke tests.
 5. Interview notes and user transfer assessment.
 
 ## Test Baseline
 
-Last independently verified before the RAG migration:
+Latest independently verified (2026-07-28, MCP repair):
 
 ```text
-191 passed, 4 deselected
+default offline: 153 passed, 13 deselected
+focused MCP: 15 passed
+real MCP E2E: 3 passed
+pip check: pass
+git diff --check: exit 0
 ```
 
 Mock-only or baseline-only tests cannot promote a row to complete.

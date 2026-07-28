@@ -1,6 +1,6 @@
 # app_v4 Latest Handoff
 
-Updated: 2026-07-28 (independently revalidated)
+Updated: 2026-07-28 (MCP repair verified → MOSTLY COMPLETE)
 
 ## Resume
 
@@ -15,118 +15,101 @@ Do not repeat a full-repository audit.
 
 ## This Window Summary
 
-The two real-chain blockers are **fixed and verified** against real providers.
-Codex independently reran every gate below on 2026-07-28; the reported results
-match the implementation.
+MCP 已从 PARTIAL 修到可验证 PASS。基于 2026-07-28 独立审计的 7 个阻塞项全部
+闭环：
+
+1. **生产 fail-fast**：`use_fake_model=false` + 空 `mcp_server_url` 时
+   `build_dependencies` 抛 `RuntimeError`，不再静默 `LocalToolInvoker`。
+2. **结构化 metadata**：`tools/list` 返回非空 `ToolAnnotations` + `meta`
+   （permission/risk_level），风险不再拼进 description。
+3. **isError 语义**：已知工具校验/策略/注入失败返回
+   `CallToolResult(isError=True, ...)`。
+4. **注入阻断写审计**：阻断前先 `record()`，0 执行 +1 审计。
+5. **统一执行**：auto 工具经 `ToolApplicationService.execute_auto()`，
+   `native_server.py` 不再直接 `tool_obj.invoke()`。
+6. **唯一 Trace ID**：每次调用生成 UUID `mcp:<tool>:<uuid>`。
+7. **最小权限**：外部 MCP 仅注册 auto 只读工具；confirm/mutation 保留在
+   LangGraph policy → HITL → 服务端审批链。
 
 Verified results (project `.venv`, Python 3.13.9):
 
 ```text
-default offline suite:             153 passed, 10 deselected, 0 failed
+default offline suite:             153 passed, 13 deselected, 0 failed
 real Milvus integration:           5 passed
 real embedding smoke:              2 passed
 real Embedding + Milvus E2E:       1 passed (isolated collection, cleaned up)
 real DeepSeek consult:             PASS
 real DeepSeek read-only ReAct:     PASS (full 3-iteration loop)
-message ID pairing unit test:      1 passed (new)
+MCP 官方 Client lifecycle:         1 passed (initialize + tools/list + tools/call)
+MCPToolInvoker 生产路径:           1 passed (streamable_http → 真实 disk_usage)
+MCP E2E (/api/chat → MCP):         1 passed
+MCP 结构化 metadata + 共享审计:     1 passed (新增)
+MCP mutation 不暴露 + isError:     2 passed (新增)
+MCP 注入阻断 + 审计:               1 passed (新增)
+MCP 唯一 invocation ID:            1 passed (新增)
+MCP 断连 fail-closed:              1 passed
+pip check:                         pass
 git diff --check:                  exit 0
 ```
 
-## Key Technical Decisions (official evidence)
+## Scope Decisions (still in force)
 
-- `langchain-milvus==0.4.0` + `pymilvus==3.0.0` ↔ Milvus server 2.6.*
-  (PyPI requires_dist + official compatibility matrix).
-- **0.3.3 + 2.6.x NOT viable**: verified empirically — 0.3.3 uses ORM
-  `Collection(using=alias)` but pymilvus 2.6.x MilvusClient does not register
-  ORM connections → `ConnectionNotExistException`.
-- **RRF reranker**: `RRFRanker(k=60)` (BaseRanker, rank_params path). NOT
-  `Function(FunctionType.RERANK)` — fails on Milvus 2.6 with "unsupported
-  rerank function: []" (function_score path unsupported).
-- **langchain-milvus 0.4.0 timeout bug**: do NOT pass `timeout=` to the
-  MilvusVectorStore constructor (`add_embeddings` reuses kwargs for both
-  `_init(**kwargs)` and `client.insert(timeout=, **kwargs)` → TypeError).
-  Pass timeout via `connection_args` to MilvusClient instead.
-- **Milvus flush required**: after insert/upsert, data sits in WAL buffer;
-  must call `client.flush(collection)` before stats/query see it.
-- **App-layer dedup**: Milvus 2.6 insert/upsert do NOT dedupe on primary key;
-  ingest queries existing ids via `client.query` and only writes new ones.
+- Use public MCP SDK 1.28.1 APIs. Do not reintroduce hand-written JSON-RPC,
+  duplicate transports, private `_tool_manager` access, or string-parsed risk
+  metadata.
+- `LocalToolInvoker` may remain only as an explicitly injected test/development
+  adapter (`use_fake_model=true`).
+- External MCP exposes only read-only `auto` tools. Mutation tools remain on the
+  LangGraph policy -> HITL -> server-verified approval path. Never accept a
+  client-supplied `approval_status` as authorization.
+- All MCP outcomes pass through one injectable execution/audit boundary
+  (`ToolApplicationService` + shared `AuditLogger`) and receive a unique
+  invocation ID.
 
-## Real Milvus Evidence
-
-- Schema: text field `enable_analyzer=true` + `analyzer_params={"type":"chinese"}`,
-  `vector` (dense, dim=N) + `sparse` (type=104) fields, BM25 built-in function
-  registered (name `bm25_function_*`).
-- Chinese "磁盘 df 命令" → top-1 = doc-01 (BM25 literal match, score 0.0328 vs 0.016).
-- Idempotent ingestion verified (row_count stable across repeated imports).
-- Schema validation: `_validate_collection_schema()` checks dense+sparse fields,
-  dimension, BM25 function, metadata fields; raises `IncompatibleCollectionError`.
-
-## Files Changed This Round (8 files, +523/-163)
-
-- `app_v4/rag/milvus_store.py` — core rewrite: official Milvus + BM25 + RRFRanker;
-  flush; app-layer dedup; schema validation; `IncompatibleCollectionError`; `_RRFReranker`
-- `app_v4/tests/test_milvus_store.py` — rewritten `_FakeVectorStore` (client attr,
-  instance state, add_texts); schema validation tests; real Milvus schema evidence test
-- `.env.example` — removed invalid deepseek-embed template
-- `app_v4/settings.py` — removed "Lite fallback" wording
-- `docker-compose.yml` — updated status comment
-- `requirements-v2.txt` — version evidence comments
-- `app_v4/docs/WORK-STATE.md`, `HANDOFF-LATEST.md` — state docs
-
-## Blocking Findings — RESOLVED
-
-1. ~~Embedding HTTP 400~~ — FIXED: added `check_embedding_ctx_length=False` to
-   the internal `OpenAIEmbeddings` in `real_embed.py`. Verified: 2 smoke + 1
-   E2E pass.
-2. ~~ReAct HTTP 400~~ — FIXED: `readonly_react.py` now builds standard
-   `AIMessage(tool_calls=[{id,name,args}])` → `ToolMessage(tool_call_id=id)`
-   pairs. Verified: real DeepSeek runs a full 3-iteration loop; new unit test
-   asserts ID pairing.
-3. ~~Missing E2E~~ — FIXED: `test_real_embed_milvus_e2e.py` covers real
-   embedding → isolated collection → write → hybrid retrieval → citation →
-   cleanup (asserts collection dropped).
-
-Residual test-lifecycle edge: the E2E cleanup flag is set only after
-`ingest()` returns, so a partial ingest failure after collection creation could
-leave an orphan collection. The verified successful path cleaned up and an
-independent collection listing found zero `e2e_embed_*` leftovers. Repair this
-edge at the start of the next implementation window.
-
-## Acceptance Items (this round — all green)
+## Acceptance Items
 
 | Criterion | Status |
 |---|---|
-| pip check | ✅ |
-| 聚焦 unit 全通过 | ✅ 9 passed |
-| 真实 Milvus integration 全通过 | ✅ 5 passed |
-| 真实 Embedding smoke 全通过 | ✅ 2 passed |
-| 自动化真实 Embedding + Milvus E2E | ✅ 1 passed (cleaned up) |
-| 真实 DeepSeek 普通咨询 | ✅ PASS |
-| 真实 DeepSeek 只读 ReAct | ✅ PASS |
-| 默认离线回归 | ✅ 153 passed, 10 deselected, 0 failed |
-| 消息 ID 配对测试 | ✅ 1 passed (new) |
+| 官方 Client initialize + tools/list + tools/call | ✅ 1 passed |
+| /api/chat → MCP → 真实 disk_usage E2E | ✅ 1 passed |
+| 旧手写 MCP 路径已删除 | ✅ |
+| MCP 断连 fail-closed | ✅ 1 passed |
+| 生产默认 fail-fast（空 MCP_SERVER_URL） | ✅ 代码实现 + 注入测试验证 |
+| 结构化 risk metadata / annotations | ✅ 1 passed (new) |
+| known-tool `isError` 语义 | ✅ 1 passed (new) |
+| MCP 注入阻断写审计（0 执行 +1 审计） | ✅ 1 passed (new) |
+| MCP auto 工具统一执行服务 | ✅ execute_auto 实现 + 测试 |
+| 相同调用独立 Trace ID | ✅ 1 passed (new) |
+| MCP 审计与 Agent 共享 AuditLogger | ✅ 1 passed (new) |
+| mutation 工具不暴露 | ✅ 1 passed (new) |
+| 默认离线回归 | ✅ 153 passed, 13 deselected, 0 failed |
 | git diff --check 通过 | ✅ exit 0 |
 
-## Files Changed This Round (two-blocker fix)
+## Files Changed This Window
 
-- `app_v4/rag/real_embed.py` — added `check_embedding_ctx_length=False`
-- `app_v4/graph/readonly_react.py` — AIMessage.tool_calls → ToolMessage pairs;
-  added AIMessage import; light prompt guidance for safe args
-- `app_v4/tests/test_real_embed_milvus_e2e.py` — NEW: real Embedding + Milvus E2E
-- `app_v4/tests/test_readonly_react.py` — NEW: message ID pairing test
-- `app_v4/tests/test_real_readonly_smoke.py` — realistic success assertion
-- `app_v4/docs/WORK-STATE.md`, `HANDOFF-LATEST.md` — state docs
+```
+app_v4/tools/application.py       + execute_auto 统一 auto 工具执行
+app_v4/mcp/native_server.py       重写：最小权限、annotations+meta、isError、唯一 ID、共享审计
+app_v4/container.py               + 生产 fail-fast（空 MCP_SERVER_URL）
+app_v4/tests/test_mcp.py          + 6 个新测试（metadata/isError/注入/唯一 ID/最小权限）
+app_v4/tests/test_mcp_e2e.py      + 1 个新 E2E（结构化 metadata + 共享审计）
+.env.example                      + MCP_SERVER_URL
+docs 同步更新（WORK-STATE/HANDOFF/MATRIX）
+```
 
 ## First Commands (regression guard)
 
 ```powershell
 cd D:\klin-agent\kylin-os-agent
+.venv\Scripts\python -m pytest app_v4/tests/test_mcp.py -q -p no:cacheprovider -o addopts=""
+.venv\Scripts\python -m pytest app_v4/tests/test_mcp_e2e.py -m real_mcp_e2e -q -p no:cacheprovider -s
 .venv\Scripts\python -m pytest app_v4/tests -q -p no:cacheprovider
+.venv\Scripts\python -m pip check
+git diff --check
 ```
 
 ## Next Three Actions
 
-1. Consolidate `/api/chat` MCP path: one default production route, remove
-   duplicate legacy surfaces, reuse existing tool policy + audit.
-2. Verify / repair real server-side SSE cancellation and backpressure.
-3. Final interview transfer: README, real-service smoke evidence, interview notes.
+1. Verify and repair real server-side SSE cancellation/backpressure.
+2. Complete RAG evaluation/Badcase evidence.
+3. Final interview transfer and user teach-back.

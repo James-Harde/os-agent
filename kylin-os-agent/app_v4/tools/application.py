@@ -148,6 +148,52 @@ class ToolApplicationService:
             }
         return result
 
+    def execute_auto(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """统一 auto 工具执行入口（§4.4 #1 / MCP 修复 finding #5）。
+
+        仅供 ``auto`` 权限的只读工具使用；可变更工具必须走
+        :meth:`execute_mutation`，不得经由此方法。
+
+        校验顺序：
+          - 工具必须存在于注册表
+          - 工具权限必须为 auto（最小权限：外部 MCP 不暴露 confirm/mutation）
+          - 调用工具
+          - 输出扫描（注入检测）
+
+        成功、失败、拒绝都走同一错误映射和输出扫描，返回统一结构：
+        ``{status, source, ..., _output_scan}``。
+        """
+        from app_v4.tools.registry import TOOL_BY_NAME, get_tool_permission
+
+        tool = TOOL_BY_NAME.get(tool_name)
+        if tool is None:
+            return {
+                "status": "error",
+                "error": f"unknown tool: {tool_name}",
+                "source": "tool_application_service",
+            }
+        if get_tool_permission(tool_name) != "auto":
+            return {
+                "status": "error",
+                "error": f"tool {tool_name} is not auto-permission (least-privilege gate)",
+                "source": "tool_application_service",
+            }
+        try:
+            result = tool.invoke(arguments)
+        except Exception as exc:
+            result = {
+                "status": "error",
+                "error": str(exc),
+                "source": "tool_application_service",
+            }
+        # 输出扫描（注入检测）— 成功/失败都走同一扫描边界
+        scan = self.guard.scan_untrusted_output({"tool_name": tool_name, "result": result})
+        result["_output_scan"] = {
+            "detected": scan["detected"],
+            "risk_level": scan["risk_level"],
+        }
+        return result
+
     def scan_output(self, tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
         """扫描工具输出中的注入内容。"""
         return self.guard.scan_untrusted_output({"tool_name": tool_name, "result": result})

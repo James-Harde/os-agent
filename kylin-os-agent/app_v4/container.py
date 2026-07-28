@@ -295,8 +295,10 @@ def build_dependencies(
     MCP invoker 注入规则（§6 矩阵 #16 / HANDOFF 下一步 #3）：
       - settings.mcp_server_url 非空 → 注入 MCPToolInvoker(base_url=...)，
         生产流量经 streamable_http 走原生 MCP Server；
-      - 空（默认）→ 不预置 _mcp_invoker，mcp_invoker 属性懒建为
-        LocalToolInvoker，避免测试访问网络。
+      - 空 + use_fake_model=True（测试/开发）→ 不预置 _mcp_invoker，
+        mcp_invoker 属性懒建为 LocalToolInvoker，避免测试访问网络；
+      - 空 + use_fake_model=False（真实模型生产）→ fail-fast，
+        禁止静默使用 LocalToolInvoker（修复 MCP finding #1）。
     """
     deps = Dependencies(
         settings=settings,
@@ -309,4 +311,12 @@ def build_dependencies(
     if settings.mcp_server_url:
         from app_v4.mcp.agent_invoker import MCPToolInvoker
         deps._mcp_invoker = MCPToolInvoker(base_url=settings.mcp_server_url)
+    elif not settings.use_fake_model:
+        # 真实模型生产启动不得因 MCP_SERVER_URL 为空而静默使用 LocalToolInvoker
+        raise RuntimeError(
+            "生产环境（use_fake_model=false）要求 MCP_SERVER_URL 非空。"
+            "当前 mcp_server_url 为空，无法建立 MCP 连接。"
+            "请设置 MCP_SERVER_URL（如 http://127.0.0.1:8001/mcp）。"
+            "LocalToolInvoker 仅允许显式测试/开发注入。"
+        )
     return deps

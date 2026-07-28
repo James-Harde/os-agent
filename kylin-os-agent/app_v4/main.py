@@ -13,7 +13,8 @@
   - GET  /api/traces/{run_id}
   - GET  /api/audit
   - GET/POST /api/approvals/{...}
-  - POST /api/mcp         标准 MCP JSON-RPC（兼容旧客户端）
+
+标准 MCP 传输由独立 FastMCP Server 提供（Streamable HTTP，路径 /mcp）。
 """
 
 import json

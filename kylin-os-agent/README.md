@@ -112,7 +112,9 @@ http://127.0.0.1:8000
 | `POST` | `/api/approvals/{id}/approve` | 批准 |
 | `POST` | `/api/approvals/{id}/reject` | 拒绝 |
 | `POST` | `/api/approvals/{id}/resume` | 从 checkpoint 恢复 |
-| `POST` | `/api/mcp` | 兼容旧客户端的 JSON-RPC 入口 |
+
+标准 MCP 传输由独立 FastMCP Server 提供（Streamable HTTP，路径 `/mcp`）。
+不再提供 `/api/mcp` JSON-RPC 兼容端点——禁止手写 JSON-RPC 与官方 SDK 并存。
 
 ## 测试
 
@@ -139,14 +141,21 @@ python -m pytest app_v4/tests -q -p no:cacheprovider
 
 ## MCP
 
-stdio Server：
+生产唯一 MCP Server：官方 FastMCP + Streamable HTTP。
 
 ```powershell
+# 启动独立 MCP Server（默认 127.0.0.1:8001，MCP 端点路径 /mcp）
 python -m app_v4.mcp.native_server
+# 可通过环境变量覆盖：MCP_HOST / MCP_PORT
 ```
 
-Web Agent 的生产 MCP 路径通过 `MCP_SERVER_URL` 显式配置。未配置时使用的
-本地 invoker 只属于开发/测试边界，不能作为最终生产默认路径的验收证据。
+Web Agent 的生产 MCP 路径通过 `MCP_SERVER_URL`（如 `http://127.0.0.1:8001/mcp`）
+显式配置。配置后 `/api/chat` 的 auto 工具调用经官方 `ClientSession` +
+`streamablehttp_client` transport 走原生 MCP Server。MCP 不可达时结构化失败并
+fail-closed，禁止静默回退本地工具。
+
+未配置时默认使用 `LocalToolInvoker`（直接调 tool，不经 MCP transport），仅属于
+开发/测试边界，不能作为最终生产默认路径的验收证据。
 
 ## RAG
 

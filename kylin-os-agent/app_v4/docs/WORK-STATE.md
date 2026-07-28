@@ -21,7 +21,7 @@ modify `app`, `app_v2`, or `app_v3`.
 |---|---|---|
 | Agent main path | Core thin slice passed | `/api/chat` consult and bounded read-only ReAct independently pass with real DeepSeek; real tools, Trace, thread isolation, and valid `AIMessage.tool_calls` → `ToolMessage` protocol are covered |
 | Safety and HITL | Mostly complete | dangerous-request denial, injection handling, auto/confirm/deny policy, `interrupt()` and `Command(resume=...)`, audit, and idempotent approval behavior exist |
-| MCP | Partial | official FastMCP server/client and streamable HTTP tests exist; production `/api/chat` still needs one clear default MCP path and duplicate legacy surfaces need consolidation |
+| MCP | Mostly complete | 官方 FastMCP + Streamable HTTP 只读链路和 `/api/chat`→MCP→真实 disk_usage E2E 通过；生产配置为空时 fail-fast（不再静默 LocalToolInvoker）；tools/list 返回结构化 annotations+meta（permission/risk_level）；已知工具校验/策略/注入失败符合 isError 语义；auto 工具统一经 ToolApplicationService；注入阻断写审计（0 执行 +1 审计）；每次调用唯一 invocation ID；MCP 审计与 Agent 共享可注入 AuditLogger；外部 MCP 仅暴露 auto 只读工具（最小权限） |
 | RAG | Core thin slice passed | real Ollama Embedding → Milvus dense + BM25 + RRF → cited results independently passes; retrieval evaluation and measured bad-case work remain later delivery items |
 | Streaming/performance | Partial | SSE, TTFT fields, token bucket, cache, budgets, and kill switch exist; real server-side cancellation/backpressure still needs verification and repair |
 | Memory/context | Basic complete | thread checkpoints, SQLite long-term memory, user/thread isolation, TTL, and compression foundations exist |
@@ -46,6 +46,45 @@ The application uses a hybrid architecture:
 8. Model output is an untrusted candidate decision. The graph validates schema,
    tool allowlist, parameters, permission, risk, budget, and approval before
    execution.
+
+## Latest Independent MCP Audit (2026-07-28, repair verified)
+
+Verified:
+
+```text
+focused MCP tests:                 15 passed
+real Streamable HTTP MCP E2E:      3 passed
+default offline suite:             153 passed, 13 deselected
+pip check:                         pass
+git diff --check:                  exit 0
+```
+
+The 2026-07-28 independent audit found 7 MCP gaps. All seven are now closed
+by code changes in this window:
+
+1. **Production fail-fast**: `build_dependencies` raises `RuntimeError` when
+   `use_fake_model=false` and `mcp_server_url` is empty — no silent
+   `LocalToolInvoker`. `LocalToolInvoker` remains only for explicit
+   test/dev injection (`use_fake_model=true`).
+2. **Structured metadata**: `tools/list` returns non-null `ToolAnnotations`
+   (`readOnlyHint`/`destructiveHint`/`idempotentHint`) and structured `meta`
+   (`permission`, `risk_level`). Risk is no longer appended to the description.
+3. **isError semantics**: known-tool validation failures, policy blocks, and
+   injection blocks return `CallToolResult(isError=True, ...)` while
+   preserving the JSON payload.
+4. **Blocked injection audited**: the handler writes the MCP audit row *before*
+   returning the blocked result, so a blocked call produces exactly one audit
+   row with zero tool executions.
+5. **Unified execution**: auto tools go through
+   `ToolApplicationService.execute_auto()` (schema check, permission check,
+   invoke, output scan) — `native_server.py` no longer calls
+   `tool_obj.invoke()` directly.
+6. **Unique Trace ID**: each MCP call generates a fresh UUID invocation ID
+   (`mcp:<tool>:<uuid>`), so repeated identical calls get distinct trace rows.
+7. **Least privilege + confirm boundary**: external MCP registers only `auto`
+   read-only tools. `confirm`/`mutation` tools stay on the LangGraph
+   policy → HITL → server-verified approval path; client-supplied
+   `approval_status` is never trusted.
 
 ## RAG Decision
 
@@ -144,7 +183,7 @@ requirements-v2.txt                    |  +-    (version evidence comments)
 ## Independent Audit Evidence (2026-07-28, independently revalidated)
 
 ```text
-default offline suite:             153 passed, 10 deselected, 0 failed
+default offline suite (latest):    149 passed, 12 deselected, 0 failed
 real Milvus integration:           5 passed
 real embedding smoke:              2 passed (HTTP 400 fixed)
 real Embedding + Milvus E2E:       1 passed (isolated collection, cleaned up)
@@ -195,18 +234,17 @@ git diff --check:                  exit 0
 
 ## Known Gaps
 
-1. `/api/chat` MCP consolidation, SSE cancellation/backpressure, and final user
-   interview transfer remain pending now that the two active blockers are fixed.
-2. Real-model readonly ReAct is still non-deterministic: the model may pick
+1. MCP automated acceptance is now closed; remaining item is a real-model
+   production smoke with `MCP_SERVER_URL` configured (the real `.env`
+   currently has it empty, so production startup now intentionally fail-fast
+   until the operator sets it).
+2. SSE cancellation/backpressure and final user interview transfer remain
+   pending.
+3. Real-model readonly ReAct is still non-deterministic: the model may pick
    arguments the safety validator rejects on some runs. The pipeline handles
    this gracefully (error Observation fed back, loop continues), but a run is
    not guaranteed to show successful tool data every time. Prompt guidance
    mitigates but does not eliminate this.
-3. `test_real_embed_milvus_e2e.py` sets its cleanup flag only after `ingest()`
-   returns. The successful path cleans up and no temporary collection remains,
-   but a partial ingest failure after collection creation could leave an
-   orphan collection. Fix this test-lifecycle edge in the next implementation
-   window; it does not invalidate the independently passed success-path E2E.
 
 ## Uncompleted Acceptance Items
 
@@ -219,7 +257,7 @@ git diff --check:                  exit 0
 | 自动化真实 Embedding + Milvus E2E | ✅ 1 passed (collection cleaned up) |
 | 真实 DeepSeek 普通咨询 | ✅ PASS |
 | 真实 DeepSeek 只读 ReAct | ✅ PASS |
-| 默认离线回归 | ✅ 153 passed, 10 deselected, 0 failed |
+| 默认离线回归 | ✅ 149 passed, 12 deselected, 0 failed |
 | 消息 ID 配对测试 | ✅ 1 passed (new) |
 | 重复导入行数不增长 | ✅ verified (app-layer dedup) |
 | schema/dimension 不兼容测试通过 | ✅ 2 unit tests (missing BM25, dim mismatch) |
@@ -252,13 +290,9 @@ Run after the ReAct message repair with real network access:
 
 ## Next Three Actions
 
-1. Consolidate `/api/chat`'s MCP path: pick one default production MCP route
-   and remove duplicate legacy surfaces. Reuse the existing tool policy and
-   audit path.
-2. Verify and repair real server-side SSE cancellation / backpressure (still
-   unverified in this round).
-3. Final user interview transfer: README, real-service smoke evidence, and
-   interview notes.
+1. Verify and repair real server-side SSE cancellation / backpressure.
+2. Complete RAG evaluation/Badcase evidence.
+3. Final interview transfer and user teach-back.
 
 ## Documentation Rules
 
