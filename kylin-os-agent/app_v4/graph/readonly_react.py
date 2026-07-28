@@ -28,7 +28,7 @@ import json
 import time
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app_v4.graph.state import AgentState
 from app_v4.graph.budget import BudgetConfig, budget_exceeded
@@ -163,6 +163,8 @@ def readonly_decide_node(state: AgentState) -> dict[str, Any]:
         "- 如果还需要更多信息，返回一个工具调用（action=tool）。"
         "- 如果已有足够信息回答用户，返回最终答案（action=final）。"
         "只返回 JSON，不要返回其他内容。"
+        "注意：工具参数必须使用安全范围内的值（例如 path 用 '.' 表示当前项目目录，"
+        "不要用根目录 '/' 或越级路径，否则会被安全校验拒绝）。"
     )
 
     # ---- 长期记忆召回：注入 system prompt 影响决策 ----
@@ -196,19 +198,21 @@ def readonly_decide_node(state: AgentState) -> dict[str, Any]:
     # 工具输出一律视为不可信数据，必须与用户指令结构化隔离，
     # 不能让模型把工具输出当成可服从的系统指令（防 Prompt Injection）。
     #
-    # 这里使用 ToolMessage（LangChain 标准的 tool-result 消息类型），
-    # 而非把观测塞进 HumanMessage。ToolMessage 在消息流中语义明确：
-    # 这是某个工具的返回结果，不是用户说的话。
+    # 这里使用标准的 chat-completions 工具消息对：
+    #   AIMessage(tool_calls=[{id, name, args}]) → ToolMessage(tool_call_id=同一 id)
+    # 而非把观测塞进 HumanMessage，也不是孤立发送 ToolMessage。
     #
-    # 边界说明（为什么 tool_call_id 是合成的）：
-    #   我们没有走 LangChain 原生的 AIMessage.tool_calls → ToolMessage 配对路径
-    #   （模型输出是 JSON 文本，由 _parse_action 解析后通过 mcp_invoker 执行），
-    #   因此没有原生的 tool_call_id。这里用 "react_obs_{i}_{tool_name}" 合成一个
-    #   稳定 ID，仅用于满足 ToolMessage 的字段约束，不代表原生 tool_call 协议。
-    #   真实 LLM（OpenAI 等）同样期望工具结果以 ToolMessage 形式回传，
-    #   这比混在 HumanMessage 里更符合 chat-completions 的 tool 消息语义。
+    # 协议约束（OpenAI / DeepSeek 等）：每个 ToolMessage 必须紧跟一个前置的
+    # AIMessage，且 tool_call_id 必须与该 AIMessage.tool_calls 中某个 id 匹配，
+    # 否则服务端返回 HTTP 400 "invalid tool-message sequence"。
+    #
+    # 我们没有走 LangChain 原生 bind_tools 路径（模型输出是 JSON 文本，由
+    # _parse_action 解析后通过 mcp_invoker 执行），所以这里显式构造标准消息对，
+    # 让真实 LLM 看到合法的多轮工具协议。工具结果仍作为不可信数据处理，
+    # 注入警告保留，不降低防护。
     if observations:
         for i, o in enumerate(observations):
+            tool_call_id = f"react_obs_{i}_{o.get('tool_name', 'unknown')}"
             obs_text = (
                 f"[Observation {i+1}] {o.get('tool_name', '?')}: "
                 f"status={o.get('status', '?')}, "
@@ -216,9 +220,17 @@ def readonly_decide_node(state: AgentState) -> dict[str, Any]:
             )
             if o.get("injection_warning"):
                 obs_text += f"\n  ⚠ {o['injection_warning']}"
+            # 前置 AIMessage：声明"模型曾决定调用该工具"（args 为原始调用参数）。
+            messages.append(AIMessage(content="", tool_calls=[{
+                "id": tool_call_id,
+                "name": o.get("tool_name", ""),
+                "args": o.get("arguments", {}),
+                "type": "tool_call",
+            }]))
+            # 紧跟 ToolMessage：tool_call_id 必须与上方 AIMessage 的 id 一致。
             messages.append(ToolMessage(
                 content=obs_text,
-                tool_call_id=f"react_obs_{i}_{o.get('tool_name', 'unknown')}",
+                tool_call_id=tool_call_id,
                 name=o.get("tool_name", ""),
             ))
 

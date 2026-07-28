@@ -30,9 +30,13 @@ psutil==7.1.3
 #
 # 版本依据（官方兼容性）：
 #   - langchain-milvus 0.4.0 强制 pymilvus>=3.0.0,<4.0（PyPI requires_dist）。
-#   - pymilvus 3.0.0 官方兼容 Milvus server 2.6.*；RRF reranker（Function RERANK）要求 Milvus 2.6+。
+#   - pymilvus 3.0.0 官方兼容 Milvus server 2.6.*（official compatibility matrix）。
 #   - Milvus server：v2.6.21（Docker Standalone，docker-compose.yml）。
-#   - milvus-lite 已移除：langchain-milvus 0.4.0 限制其仅非 Windows（sys_platform != "win32"），
+#   - RRF reranker：使用 RRFRanker(k=60)（BaseRanker），而非
+#     Function(FunctionType.RERANK)——后者在 Milvus 2.6 上报
+#     "unsupported rerank function: []"（走 function_score 路径，2.6 不支持）。
+#   - 已知 langchain-milvus 0.4.0 bug：构造器不传 timeout（add_embeddings 会重复传参）。
+#   - milvus-lite 已移除：Windows 不支持（sys_platform != "win32"），
 #     且生产路径必须指向 Docker Standalone，禁止回退到 Lite。
 langchain-text-splitters==1.1.2
 langchain-milvus==0.4.0

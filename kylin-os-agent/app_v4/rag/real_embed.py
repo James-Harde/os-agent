@@ -65,12 +65,18 @@ class OpenAICompatibleEmbedder(Embeddings):
             return
         from langchain_openai import OpenAIEmbeddings
 
+        # check_embedding_ctx_length=False 是关键：
+        #   OpenAIEmbeddings 默认会先把文本 tokenize 为 token-ID 数组再发请求。
+        #   Ollama 等 OpenAI 兼容 Embedding 服务端期望收到原始字符串，收到 token-ID
+        #   数组会返回 HTTP 400 "invalid input type"。设为 False 即直接发送原始文本，
+        #   由服务端自行 tokenize。这是官方 LangChain 配置项，无需手写 HTTP。
         self._client = OpenAIEmbeddings(
             base_url=self._base_url,
             api_key=self._api_key,
             model=self.model,
             dimensions=self.dimensions,
             timeout=self._timeout,
+            check_embedding_ctx_length=False,
         )
         logger.info("OpenAICompatibleEmbedder 初始化完成: model=%s", self.model)
 

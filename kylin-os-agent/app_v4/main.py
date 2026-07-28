@@ -32,7 +32,6 @@ from slowapi.middleware import SlowAPIMiddleware
 logger = logging.getLogger("app_v4.mcp")
 
 from app_v4.graph.runner import run_agent, streaming_agent
-from app_v4.mcp.server import MCPServer
 from app_v4.settings import Settings, load_settings
 from app_v4.container import Dependencies, build_dependencies
 
@@ -297,31 +296,8 @@ def _register_routes(app: FastAPI) -> None:
             "trace_steps": trace_steps,
         }
 
-    # ---- MCP JSON-RPC 端点（兼容旧客户端；推荐用标准原生 MCP 传输）----
-    @app.post("/api/mcp")
-    async def mcp_endpoint(
-        request: Request,
-        _: None = Depends(rate_limit_dependency),
-    ) -> JSONResponse:
-        try:
-            body = await request.json()
-        except json.JSONDecodeError as exc:
-            logger.warning("MCP 请求 JSON 解析失败: %s", exc)
-            return JSONResponse(
-                {"jsonrpc": "2.0", "id": None,
-                 "error": {"code": -32700, "message": "Parse error: request body is not valid JSON"}},
-                status_code=400,
-            )
-        except Exception as exc:
-            logger.warning("MCP 请求体读取异常 [%s]: %s", type(exc).__name__, exc)
-            return JSONResponse(
-                {"jsonrpc": "2.0", "id": None,
-                 "error": {"code": -32700, "message": "Parse error: cannot read request body"}},
-                status_code=400,
-            )
-        _mcp_server = MCPServer()
-        result = _mcp_server.handle(body)
-        return JSONResponse(result)
+    # 标准 MCP 传输由独立 FastMCP Server 提供（Streamable HTTP，路径 /mcp）。
+    # 不再提供 /api/mcp JSON-RPC 兼容端点——禁止手写 JSON-RPC 与官方 SDK 并存。
 
 
 # ---------------------------------------------------------------------------

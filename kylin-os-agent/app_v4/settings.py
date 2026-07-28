@@ -55,8 +55,8 @@ class Settings(BaseSettings):
 
     # ---- Milvus（向量检索） ----
     # 显式配置完整 Milvus URI（如 http://127.0.0.1:19530 指向 Docker Milvus Standalone）。
-    # 空字符串 = 未配置 → 回退到嵌入式 Milvus Lite（仅本地开发/smoke test，数据临时）。
-    # 生产必须显式配置，避免把临时 Lite 数据当成可靠存储。
+    # 空字符串 = 未配置 → rag_search 返回结构化 unavailable（禁止回退到嵌入式 Milvus Lite）。
+    # milvus-lite 在 Windows 上不被官方支持，且生产路径必须指向 Docker Milvus Standalone。
     milvus_uri: str = ""
     milvus_collection: str = "rag_knowledge"
     milvus_timeout: float = 10.0

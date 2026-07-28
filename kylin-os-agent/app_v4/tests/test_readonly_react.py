@@ -11,6 +11,8 @@
   8. 两个并发 thread 的 ReAct 状态、Observation、预算和 Trace 完全隔离
   9. 现有副作用 HITL、RAG、MCP、安全测试继续通过（回归）
   10. real-chat smoke 在独立文件 test_real_readonly_smoke.py
+  11. readonly_decide_node 构建标准 AIMessage.tool_calls → ToolMessage 消息对，
+      tool_call_id 配对（修复 DeepSeek HTTP 400 的协议级测试）
 """
 
 from __future__ import annotations
@@ -681,3 +683,137 @@ def test_final_answer_path_sets_stop_reason_and_source(client: TestClient):
         f"answer_source 应为 model_final_answer, 得到 {data.get('answer_source')}"
     # answer 非空
     assert len(data.get("answer", "")) > 0
+
+
+# ---------------------------------------------------------------------------
+# 11. 消息协议：AIMessage.tool_calls → ToolMessage.tool_call_id 配对
+# ---------------------------------------------------------------------------
+def test_react_message_protocol_tool_call_id_pairing(isolated_deps):
+    """readonly_decide_node 必须构建标准消息对：
+    AIMessage(tool_calls=[{id, name, args}]) → ToolMessage(tool_call_id=同一 id)。
+
+    真实 LLM（DeepSeek 等）要求每个 ToolMessage 都有前置 AIMessage.tool_calls
+    中匹配的 tool_call_id，否则返回 HTTP 400。本测试直接检查传给模型的消息序列，
+    不依赖真实网络。
+    """
+    from unittest.mock import patch
+
+    from app_v4.graph.readonly_react import readonly_decide_node
+    from app_v4.graph.state import AgentState
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    # 构造含 2 个 Observation 的状态（模拟已执行 2 轮工具）
+    state: AgentState = {
+        "messages": [HumanMessage(content="帮我分析磁盘")],
+        "run_id": "proto-test-run",
+        "thread_id": "proto-test-thread",
+        "route": "readonly_diagnosis",
+        "readonly_iterations": 2,
+        "readonly_tool_calls": 2,
+        "readonly_start_time": time.monotonic(),
+        "readonly_last_action_key": "",
+        "readonly_last_observation_key": "",
+        "readonly_no_progress_streak": 0,
+        "readonly_error_streak": 0,
+        "stop_reason": "",
+        "current_action": {},
+        "readonly_trace": [],
+        "readonly_observations": [
+            {
+                "tool_name": "disk_usage",
+                "arguments": {"path": "."},
+                "status": "success",
+                "data": {"used_percent": 72.5},
+                "error": None,
+                "duration_ms": 1.0,
+                "output_scan": {},
+                "injection_detected": False,
+                "injection_warning": "",
+            },
+            {
+                "tool_name": "process_list",
+                "arguments": {"limit": 10},
+                "status": "success",
+                "data": {"processes": [{"pid": 1, "name": "systemd"}]},
+                "error": None,
+                "duration_ms": 1.0,
+                "output_scan": {},
+                "injection_detected": False,
+                "injection_warning": "",
+            },
+        ],
+        "tool_calls": [],
+        "guard_decision": "allow",
+        "guard_reasons": [],
+        "trace_steps": [],
+        "pending_approvals": [],
+        "step_count": 0,
+        "tool_call_count": 0,
+        "budget_exceeded": False,
+        "seen_plans": [],
+        "loop_detected": False,
+        "memory_context": {},
+        "executed_approvals": [],
+        "stream_tokens": [],
+        "cancelled": False,
+        "intent": "",
+        "plan": [],
+        "answer": "",
+        "answer_source": "",
+        "user_id": "",
+    }
+
+    # 拦截 model_invoke_streaming，捕获传给模型的消息序列。
+    captured: dict[str, list] = {"messages": None}
+    original_invoke = None
+
+    def fake_invoke(model, messages, state, *args, **kwargs):
+        captured["messages"] = list(messages)  # 复制
+        # 返回一个合法的 final action JSON，避免节点解析失败。
+        return '{"action": "final", "answer": "根据观测：系统正常。"}'
+
+    with patch("app_v4.graph.readonly_react.model_invoke_streaming", side_effect=fake_invoke):
+        readonly_decide_node(state)
+
+    msgs = captured["messages"]
+    assert msgs is not None, "model_invoke_streaming 应被调用"
+
+    # 提取 AIMessage 和 ToolMessage
+    ai_messages = [m for m in msgs if isinstance(m, AIMessage)]
+    tool_messages = [m for m in msgs if isinstance(m, ToolMessage)]
+
+    # 每个 Observation 应生成 1 个 AIMessage + 1 个 ToolMessage。
+    assert len(tool_messages) == 2, f"应有 2 个 ToolMessage, 实际 {len(tool_messages)}"
+    assert len(ai_messages) == 2, f"应有 2 个前置 AIMessage, 实际 {len(ai_messages)}"
+
+    # 核心断言：每个 ToolMessage 的 tool_call_id 必须能在消息序列中找到一个
+    # 前置 AIMessage，其 tool_calls 包含相同 id。
+    for tm in tool_messages:
+        assert tm.tool_call_id, "ToolMessage.tool_call_id 必须非空"
+        # 找到该 ToolMessage 在序列中的位置
+        tm_idx = msgs.index(tm)
+        # 它前面必须有一个 AIMessage，且该 AIMessage 的 tool_calls 包含该 id
+        preceding_ai = None
+        for prev_idx in range(tm_idx - 1, -1, -1):
+            if isinstance(msgs[prev_idx], AIMessage):
+                preceding_ai = msgs[prev_idx]
+                break
+        assert preceding_ai is not None, \
+            f"ToolMessage(tool_call_id={tm.tool_call_id}) 前必须有前置 AIMessage"
+        matching_calls = [
+            c for c in (preceding_ai.tool_calls or [])
+            if c.get("id") == tm.tool_call_id
+        ]
+        assert matching_calls, (
+            f"ToolMessage.tool_call_id={tm.tool_call_id} 必须匹配前置 AIMessage 的 "
+            f"tool_calls 中的 id, 实际 tool_calls={preceding_ai.tool_calls}"
+        )
+
+    # 验证 id 配对的具体值（稳定格式：react_obs_{i}_{tool_name}）
+    assert tool_messages[0].tool_call_id == "react_obs_0_disk_usage"
+    assert tool_messages[1].tool_call_id == "react_obs_1_process_list"
+    # 验证 AIMessage 的 tool_calls 含正确的 name 和 args
+    assert ai_messages[0].tool_calls[0]["name"] == "disk_usage"
+    assert ai_messages[0].tool_calls[0]["args"] == {"path": "."}
+    assert ai_messages[1].tool_calls[0]["name"] == "process_list"
+    assert ai_messages[1].tool_calls[0]["args"] == {"limit": 10}

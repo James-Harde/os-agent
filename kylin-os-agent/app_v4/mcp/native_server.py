@@ -1,12 +1,19 @@
-"""标准 MCP Server — 基于官方 MCP Python SDK (FastMCP)。
+"""标准 MCP Server — 基于官方 MCP Python SDK (FastMCP) + Streamable HTTP。
 
-修复 audit #11/#17/#18：
-  - 不再用 exec() 动态生成 handler（改用闭包工厂 + 显式 signature）。
+生产唯一 MCP Server 路径：
+  - 通过 :func:`create_mcp_server` 工厂构建可注入的 FastMCP 实例，
+    禁止修改私有 ``_tool_manager``。
   - 注册全部工具（auto + confirm），含风险/权限元数据。
-  - 复用统一 ToolApplicationService（§4.4 #2），不复制执行/安全逻辑。
+  - 复用统一 :class:`ToolApplicationService`（§4.4 #2），不复制执行/安全逻辑。
   - schema 保留类型、required、default、范围。
 
-和 /api/chat 使用同一套工具、同一安全策略、同一审计链路。
+和 ``/api/chat`` 使用同一套工具、同一安全策略、同一审计链路。
+
+启动命令（Streamable HTTP，生产默认传输）::
+
+    .venv\\Scripts\\python -m app_v4.mcp.native_server
+    # 默认监听 127.0.0.1:8001，MCP 端点路径 /mcp
+    # 可通过环境变量覆盖：MCP_HOST / MCP_PORT
 """
 
 from __future__ import annotations
@@ -25,9 +32,6 @@ from app_v4.tools.registry import TOOL_BY_NAME, get_tool_permission, get_tools
 from app_v4.safety.guard import SafetyGuard
 
 logger = logging.getLogger("app_v4.mcp.native")
-
-# 创建 FastMCP 服务器实例（标准 initialize 生命周期）
-mcp = FastMCP("kylin-secure-os-agent")
 
 
 def _json_schema_type_to_python(json_type: str) -> type:
@@ -60,7 +64,7 @@ def _make_handler(
 ):
     """为指定工具生成带显式参数的 async handler（不用 exec）。
 
-    通过闭包捕获 tool_name/tool_obj，并构造 inspect.Signature
+    通过闭包捕获 tool_name/tool_obj/app_service，并构造 inspect.Signature
     使 FastMCP 能正确解析参数名、类型、required、default。
     """
     properties = input_schema.get("properties", {})
@@ -167,11 +171,22 @@ def _risk_level_for(tool_name: str) -> str:
     return "low"
 
 
-def register_tools(app_service=None):
-    """把所有工具（auto + confirm）注册到 FastMCP，含风险/权限元数据。"""
+def create_mcp_server(
+    app_service=None,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8001,
+) -> FastMCP:
+    """构建一个注册好全部工具的 FastMCP 实例（可注入共享 ToolApplicationService）。
+
+    工厂模式：每次调用返回全新实例，避免模块级单例的 session manager
+    只能 run 一次的局限。测试与 E2E 可各自创建独立实例并绑定不同端口。
+    """
     if app_service is None:
         from app_v4.tools.application import ToolApplicationService
         app_service = ToolApplicationService()
+
+    server = FastMCP("kylin-secure-os-agent", host=host, port=port)
 
     for tool in get_tools():
         tool_obj = TOOL_BY_NAME.get(tool.name)
@@ -188,42 +203,34 @@ def register_tools(app_service=None):
         meta_suffix = f" [权限:{permission}|风险:{risk}]"
         full_description = description + meta_suffix
 
-        mcp.add_tool(
+        server.add_tool(
             fn=handler,
             name=tool.name,
             description=full_description,
             structured_output=False,
         )
 
-
-# 初始化时注册工具（可用 set_app_service 注入共享实例）
-_registered = False
+    return server
 
 
-def set_app_service(app_service):
-    """注入共享的 ToolApplicationService（与 Graph 共用同一实例）。"""
-    global _registered
-    # 清空已有工具，重新注册（确保共享 app_service）
-    if hasattr(mcp, "_tool_manager"):
-        mcp._tool_manager._tools.clear()
-    register_tools(app_service)
-    _registered = True
-
-
-# 默认注册（使用独立 ToolApplicationService，可被 set_app_service 覆盖）
-if not _registered:
-    register_tools()
-    _registered = True
+# ---------------------------------------------------------------------------
+# 默认单例（向后兼容：旧测试引用 native_server.mcp 仍可用）
+# ---------------------------------------------------------------------------
+mcp: FastMCP = create_mcp_server()
 
 
 # ---------------------------------------------------------------------------
 # 运行入口
 # ---------------------------------------------------------------------------
-async def run_stdio():
-    """通过 stdio transport 运行 MCP Server（标准传输）。"""
-    await mcp.run_stdio_async()
+async def run_streamable_http(host: str = "127.0.0.1", port: int = 8001):
+    """通过 Streamable HTTP transport 运行 MCP Server（生产默认传输）。"""
+    server = create_mcp_server(host=host, port=port)
+    await server.run_streamable_http_async()
 
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(run_stdio())
+    import os
+    host = os.environ.get("MCP_HOST", "127.0.0.1")
+    port = int(os.environ.get("MCP_PORT", "8001"))
+    asyncio.run(run_streamable_http(host=host, port=port))
