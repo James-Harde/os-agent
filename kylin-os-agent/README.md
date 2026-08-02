@@ -144,7 +144,8 @@ python -m pytest app_v4/tests -q -p no:cacheprovider
 生产唯一 MCP Server：官方 FastMCP + Streamable HTTP。
 
 ```powershell
-# 启动独立 MCP Server（默认 127.0.0.1:8001，MCP 端点路径 /mcp）
+# 终端 1：启动独立 MCP Server（默认 127.0.0.1:8001，端点 /mcp）
+# Server 不依赖 Web Agent 的 MCP_SERVER_URL。
 python -m app_v4.mcp.native_server
 # 可通过环境变量覆盖：MCP_HOST / MCP_PORT
 ```
@@ -154,8 +155,9 @@ Web Agent 的生产 MCP 路径通过 `MCP_SERVER_URL`（如 `http://127.0.0.1:80
 `streamablehttp_client` transport 走原生 MCP Server。MCP 不可达时结构化失败并
 fail-closed，禁止静默回退本地工具。
 
-未配置时默认使用 `LocalToolInvoker`（直接调 tool，不经 MCP transport），仅属于
-开发/测试边界，不能作为最终生产默认路径的验收证据。
+真实模型模式未配置 `MCP_SERVER_URL` 时 Web Agent 会在装配阶段 fail-fast。
+`LocalToolInvoker` 只在显式 `use_fake_model=true` 的开发/测试边界可用，不能作为
+生产路径的验收证据。
 
 ## RAG
 
@@ -207,4 +209,3 @@ HITL、只读 bounded ReAct、副作用固定执行链以及逐节点 Trace，�
 - `app_v4/MANUAL-TEST.md`：手工演示检查单
 
 不要新增重复的 status、audit、sprint、acceptance 或 handoff 文档。
-

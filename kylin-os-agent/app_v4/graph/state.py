@@ -58,10 +58,6 @@ class AgentState(TypedDict):
     tool_call_count: int                   # 当前 run 已调用工具总数
     budget_exceeded: bool                  # 是否已触发预算熔断
 
-    # SSE token 流式（Gate 5）
-    stream_tokens: list[str]               # 模型逐 token 产出（供 SSE token 事件）
-    cancelled: bool                        # 客户端是否请求取消
-
     # ---- 混合 Agent 主链：场景路由 + 只读 bounded ReAct ----
     # 场景路由（route_node 产出，编排层校验后的结果）
     route: str                             # "consult" / "knowledge" / "readonly_diagnosis" / "mutation"

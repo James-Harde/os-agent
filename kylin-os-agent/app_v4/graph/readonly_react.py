@@ -102,7 +102,7 @@ def _latest_user_message(state: AgentState) -> str:
 # ---------------------------------------------------------------------------
 # 节点 1: 只读 ReAct 决策
 # ---------------------------------------------------------------------------
-def readonly_decide_node(state: AgentState) -> dict[str, Any]:
+async def readonly_decide_node(state: AgentState) -> dict[str, Any]:
     """ReAct 决策节点 — 模型每轮只返回一个只读工具调用或 final answer。
 
     模型看到：用户问题 + 累积 Observation + 可用只读工具列表。
@@ -242,7 +242,7 @@ def readonly_decide_node(state: AgentState) -> dict[str, Any]:
     )))
 
     # ---- 调用模型 ----
-    full_response = model_invoke_streaming(model, messages, state)
+    full_response = await model_invoke_streaming(model, messages, state)
 
     # ---- 解析模型输出 ----
     action = _parse_action(full_response)
@@ -620,7 +620,7 @@ def scan_observation_node(state: AgentState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 节点 5: 停止 + 生成最终回答
 # ---------------------------------------------------------------------------
-def readonly_stop_node(state: AgentState) -> dict[str, Any]:
+async def readonly_stop_node(state: AgentState) -> dict[str, Any]:
     """ReAct 循环停止 — 生成最终回答。
 
     两条路径：
@@ -653,12 +653,9 @@ def readonly_stop_node(state: AgentState) -> dict[str, Any]:
         else:
             answer_source = "model_final_answer"
 
-        # 把最终回答 tokenize 到 stream_tokens，使 SSE 能排出 answer token
-        # （与路径 2 的 model_invoke_streaming 产出 token 保持一致）。
-        from app_v4.model.chat_model import _tokenize_for_stream
-        state.setdefault("stream_tokens", [])
-        for tok in _tokenize_for_stream(answer):
-            state["stream_tokens"].append(tok)
+        # Gate 5：answer token 来自 decide 节点的 model.astream()（经 LangGraph
+        # astream_events 排出），不得把最终答案手工切字符串写入 state。
+        # 因此这里不再做任何 tokenize，直接沿用模型已产出的回答。
 
         _append_trace(state, "readonly_stop", {
             "stop_reason": stop_reason,
@@ -712,7 +709,7 @@ def readonly_stop_node(state: AgentState) -> dict[str, Any]:
         HumanMessage(content=f"用户问题：{user_input}\n\n工具观测：\n{obs_text}{stop_note}"),
     ]
 
-    full_response = model_invoke_streaming(model, messages, state)
+    full_response = await model_invoke_streaming(model, messages, state)
     answer = full_response.strip()
 
     # 最终回答阻断（防止注入污染）

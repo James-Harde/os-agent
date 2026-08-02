@@ -34,4 +34,8 @@ async def build_async_checkpointer(db_path: str | Path | None = None) -> AsyncSq
     path = Path(db_path) if db_path else DEFAULT_DB_PATH
     os.makedirs(os.path.dirname(str(path)), exist_ok=True)
     conn = await aiosqlite.connect(str(path))
+    # 高并发下多个 ainvoke 同时写 checkpoint：设置 busy_timeout 让 SQLite
+    # 等待锁释放而非立即抛 SQLITE_BUSY (OperationalError)。
+    await conn.execute("PRAGMA busy_timeout=5000")
+    await conn.execute("PRAGMA journal_mode=WAL")
     return AsyncSqliteSaver(conn)

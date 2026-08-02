@@ -38,6 +38,11 @@ from app_v4.tools.registry import TOOL_BY_NAME, get_tool_permission, get_tools
 
 logger = logging.getLogger("app_v4.mcp.native")
 
+_ERROR_STATUSES = frozenset(
+    {"error", "blocked", "unavailable", "timeout", "disabled", "denied", "rejected"}
+)
+_POLICY_BLOCK_STATUSES = frozenset({"blocked", "denied", "rejected"})
+
 
 def _json_schema_type_to_python(json_type: str) -> type:
     """JSON Schema 类型 → Python 类型（用于 handler 签名 annotation）。"""
@@ -145,7 +150,7 @@ def _make_handler(
         _write_audit(audit_logger, tool_name, invocation_id, kwargs, result)
 
         # 4. 错误映射 → isError（finding #3）
-        if result.get("status") in ("error", "blocked"):
+        if result.get("status") in _ERROR_STATUSES:
             return CallToolResult(
                 isError=True,
                 content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
@@ -165,15 +170,17 @@ def _make_handler(
 
 def _write_audit(audit_logger, tool_name, invocation_id, arguments, result) -> None:
     """统一审计写入（MCP 和 Agent 共享同一 AuditLogger）。"""
+    status = result.get("status", "success")
+    policy_blocked = status in _POLICY_BLOCK_STATUSES
     audit_logger.record(
         conversation_id="mcp",
         result={
             "run_id": invocation_id,
             "thread_id": "mcp",
             "intent": f"mcp_call:{tool_name}",
-            "guard_decision": "block" if result.get("status") in ("error", "blocked") else "allow",
-            "guard_reasons": [result["error"]] if result.get("status") in ("error", "blocked") and result.get("error") else [],
-            "tool_calls": [{"tool_name": tool_name, "status": result.get("status", "success"),
+            "guard_decision": "block" if policy_blocked else "allow",
+            "guard_reasons": [result["error"]] if policy_blocked and result.get("error") else [],
+            "tool_calls": [{"tool_name": tool_name, "status": status,
                            "data": result, "arguments": arguments}],
             "answer": result.get("message", ""),
             "answer_source": "mcp_tool",
@@ -197,8 +204,9 @@ def create_mcp_server(
 
     Args:
         app_service: 统一工具应用服务；None 则创建默认实例。
-        audit_logger: 可注入审计日志器（MCP 与 Agent 共享同一实例）；
-            None 则从容器获取当前 audit_logger。
+        audit_logger: 可注入审计日志器；None 时使用与 Web Agent 相同的
+            默认 SQLite 路径。独立进程通过同一存储共享审计，而不依赖
+            Web Agent 的 MCP Client 容器。
         host: 监听地址。
         port: 监听端口。
     """
@@ -207,8 +215,8 @@ def create_mcp_server(
         app_service = ToolApplicationService()
 
     if audit_logger is None:
-        from app_v4.audit.logger import get_audit_logger
-        audit_logger = get_audit_logger()
+        from app_v4.audit.logger import AuditLogger
+        audit_logger = AuditLogger()
 
     server = FastMCP("kylin-secure-os-agent", host=host, port=port)
 
@@ -248,12 +256,6 @@ def create_mcp_server(
         )
 
     return server
-
-
-# ---------------------------------------------------------------------------
-# 默认单例（向后兼容：旧测试引用 native_server.mcp 仍可用）
-# ---------------------------------------------------------------------------
-mcp: FastMCP = create_mcp_server()
 
 
 # ---------------------------------------------------------------------------

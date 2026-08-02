@@ -1,0 +1,4335 @@
+{
+  "source": "D:\\klin-agent\\wy-学习文档.docx",
+  "paragraph_count": 618,
+  "table_count": 0,
+  "inline_shape_count": 0,
+  "section_count": 1,
+  "blocks": [
+    {
+      "kind": "paragraph",
+      "index": 0,
+      "style": "Heading 1",
+      "numbering": null,
+      "text": "7-7"
+    },
+    {
+      "kind": "paragraph",
+      "index": 1,
+      "style": "Normal",
+      "numbering": null,
+      "text": "【架构与并发】 基于 DDD 分层设计 Deep Agent 沙箱子系统，通过 JVM 单例 registry + Reactor Mono singleflight + Squirrel Redis 分布式锁三级互斥，在 xxx QPS 下同会话并发场景零重复创建。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 2,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 3,
+      "style": "Normal",
+      "numbering": null,
+      "text": "【持久化与冷启】 用 s3fs FUSE 把沙箱工作目录挂载到 S3，两阶段并行 bootstrap（initWorkspace / mountS3 / injectAuth），支持沙箱销毁后工作目录零感知恢复，冷启动 30s → xxx s，token 全自动续期。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 4,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 5,
+      "style": "Normal",
+      "numbering": null,
+      "text": "【安全与自愈】 设计 read/write 双 allowed-roots 白名单 + path traversal 拦截防 LLM 越权；按 Business/Transient/SandboxInfra 三类分流异常，基于 InterruptionController 实现 sandbox 不可用时 agent loop 瞬时中断，避免死循环浪费 token。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 6,
+      "style": "Heading 1",
+      "numbering": null,
+      "text": "7-7"
+    },
+    {
+      "kind": "paragraph",
+      "index": 7,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Deep Agent 沙箱系统"
+    },
+    {
+      "kind": "paragraph",
+      "index": 8,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 9,
+      "style": "Normal",
+      "numbering": null,
+      "text": "1. 是什么 / 解决什么问题"
+    },
+    {
+      "kind": "paragraph",
+      "index": 10,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 11,
+      "style": "Normal",
+      "numbering": null,
+      "text": "一句话定义：沙箱是 Deep Agent（LLM Agent）里为每个用户会话提供隔离代码执行环境的中间层——把 LLM 生成的 shell/python 代码放进远程 me2b 容器里跑，stdout/stderr/文件结果回流到 LLM 上下文，同时用 s3fs 把工作目录挂载到 S3 做跨轮次持久化。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 12,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 13,
+      "style": "Normal",
+      "numbering": null,
+      "text": "架构位置（自上而下）："
+    },
+    {
+      "kind": "paragraph",
+      "index": 14,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 15,
+      "style": "Normal",
+      "numbering": null,
+      "text": "interfaces (REST/AG-UI)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 16,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  → application (ChatAppService)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 17,
+      "style": "Normal",
+      "numbering": null,
+      "text": "    → domain/runner/Runner ← 在 buildDeepAgent() 里注册 5 个 SandboxTools + SandboxHook"
+    },
+    {
+      "kind": "paragraph",
+      "index": 18,
+      "style": "Normal",
+      "numbering": null,
+      "text": "      → domain/tool/builtin/SandboxTools ← LLM 看到的 tool schema"
+    },
+    {
+      "kind": "paragraph",
+      "index": 19,
+      "style": "Normal",
+      "numbering": null,
+      "text": "        → domain/sandbox/entity/ManagedSandbox ← 核心聚合根（生命周期 + 业务操作）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 20,
+      "style": "Normal",
+      "numbering": null,
+      "text": "          → infrastructure/sandbox/SandboxFactory ← 调 me2b SDK"
+    },
+    {
+      "kind": "paragraph",
+      "index": 21,
+      "style": "Normal",
+      "numbering": null,
+      "text": "          → infrastructure/sandbox/SandboxBootstrapper ← s3fs 挂载 + token 注入 + health check"
+    },
+    {
+      "kind": "paragraph",
+      "index": 22,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 23,
+      "style": "Normal",
+      "numbering": null,
+      "text": "典型场景：用户 \"帮我写个 python 把 CSV 转 excel\""
+    },
+    {
+      "kind": "paragraph",
+      "index": 24,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 25,
+      "style": "Normal",
+      "numbering": null,
+      "text": "LLM → sandbox_write_file(\"/home/user/friday/agent/temp/convert.py\", \"...\")"
+    },
+    {
+      "kind": "paragraph",
+      "index": 26,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 27,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SDK 走 hook 链 → SandboxHook.onToolStart() → ManagedSandbox.ensureConnected() 建/取沙箱连接"
+    },
+    {
+      "kind": "paragraph",
+      "index": 28,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 29,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxPathValidator.validateWritePath() 校验路径合法"
+    },
+    {
+      "kind": "paragraph",
+      "index": 30,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 31,
+      "style": "Normal",
+      "numbering": null,
+      "text": "sandboxConnect.getFilesystem().write() 落盘"
+    },
+    {
+      "kind": "paragraph",
+      "index": 32,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 33,
+      "style": "Normal",
+      "numbering": null,
+      "text": "LLM 下一轮 → sandbox_exec(\"python3 /home/user/friday/agent/temp/convert.py\") 执行"
+    },
+    {
+      "kind": "paragraph",
+      "index": 34,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 35,
+      "style": "Normal",
+      "numbering": null,
+      "text": "LLM → sandbox_share_file_link(...) 生成 S3 presigned URL 给用户"
+    },
+    {
+      "kind": "paragraph",
+      "index": 36,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 37,
+      "style": "Normal",
+      "numbering": null,
+      "text": "2. 全部用途（每一项都有具体位置）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 38,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 39,
+      "style": "Normal",
+      "numbering": null,
+      "text": "#"
+    },
+    {
+      "kind": "paragraph",
+      "index": 40,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 41,
+      "style": "Normal",
+      "numbering": null,
+      "text": "用途"
+    },
+    {
+      "kind": "paragraph",
+      "index": 42,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 43,
+      "style": "Normal",
+      "numbering": null,
+      "text": "关键类/方法"
+    },
+    {
+      "kind": "paragraph",
+      "index": 44,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 45,
+      "style": "Normal",
+      "numbering": null,
+      "text": "代码位置"
+    },
+    {
+      "kind": "paragraph",
+      "index": 46,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 47,
+      "style": "Normal",
+      "numbering": null,
+      "text": "1"
+    },
+    {
+      "kind": "paragraph",
+      "index": 48,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 49,
+      "style": "Normal",
+      "numbering": null,
+      "text": "代码/shell 执行"
+    },
+    {
+      "kind": "paragraph",
+      "index": 50,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 51,
+      "style": "Normal",
+      "numbering": null,
+      "text": "ManagedSandbox.exec()"
+    },
+    {
+      "kind": "paragraph",
+      "index": 52,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 53,
+      "style": "Normal",
+      "numbering": null,
+      "text": "ManagedSandbox.java:171-217"
+    },
+    {
+      "kind": "paragraph",
+      "index": 54,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 55,
+      "style": "Normal",
+      "numbering": null,
+      "text": "2"
+    },
+    {
+      "kind": "paragraph",
+      "index": 56,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 57,
+      "style": "Normal",
+      "numbering": null,
+      "text": "文件读写（含追加）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 58,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 59,
+      "style": "Normal",
+      "numbering": null,
+      "text": "readFile/writeFile()"
+    },
+    {
+      "kind": "paragraph",
+      "index": 60,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 61,
+      "style": "Normal",
+      "numbering": null,
+      "text": "ManagedSandbox.java:219-318"
+    },
+    {
+      "kind": "paragraph",
+      "index": 62,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 63,
+      "style": "Normal",
+      "numbering": null,
+      "text": "3"
+    },
+    {
+      "kind": "paragraph",
+      "index": 64,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 65,
+      "style": "Normal",
+      "numbering": null,
+      "text": "目录遍历（限深度 32、条目 200）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 66,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 67,
+      "style": "Normal",
+      "numbering": null,
+      "text": "listDir()"
+    },
+    {
+      "kind": "paragraph",
+      "index": 68,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 69,
+      "style": "Normal",
+      "numbering": null,
+      "text": "ManagedSandbox.java:320-361"
+    },
+    {
+      "kind": "paragraph",
+      "index": 70,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 71,
+      "style": "Normal",
+      "numbering": null,
+      "text": "4"
+    },
+    {
+      "kind": "paragraph",
+      "index": 72,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 73,
+      "style": "Normal",
+      "numbering": null,
+      "text": "文件下载链接（S3 presigned 72h）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 74,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 75,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxTools.GET_FILE_LINK + SandboxMountFileS3UrlGenerator"
+    },
+    {
+      "kind": "paragraph",
+      "index": 76,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 77,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxTools.java:102-138"
+    },
+    {
+      "kind": "paragraph",
+      "index": 78,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 79,
+      "style": "Normal",
+      "numbering": null,
+      "text": "5"
+    },
+    {
+      "kind": "paragraph",
+      "index": 80,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 81,
+      "style": "Normal",
+      "numbering": null,
+      "text": "工作目录持久化"
+    },
+    {
+      "kind": "paragraph",
+      "index": 82,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 83,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxBootstrapper.mountS3()"
+    },
+    {
+      "kind": "paragraph",
+      "index": 84,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 85,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxBootstrapper.java:109-159"
+    },
+    {
+      "kind": "paragraph",
+      "index": 86,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 87,
+      "style": "Normal",
+      "numbering": null,
+      "text": "6"
+    },
+    {
+      "kind": "paragraph",
+      "index": 88,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 89,
+      "style": "Normal",
+      "numbering": null,
+      "text": "多轮会话隔离（USER/SESSION 维度）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 90,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 91,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxScope + SandboxBinding"
+    },
+    {
+      "kind": "paragraph",
+      "index": 92,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 93,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxScope.java:26-47"
+    },
+    {
+      "kind": "paragraph",
+      "index": 94,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 95,
+      "style": "Normal",
+      "numbering": null,
+      "text": "7"
+    },
+    {
+      "kind": "paragraph",
+      "index": 96,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 97,
+      "style": "Normal",
+      "numbering": null,
+      "text": "生命周期管理"
+    },
+    {
+      "kind": "paragraph",
+      "index": 98,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 99,
+      "style": "Normal",
+      "numbering": null,
+      "text": "ensureConnected() + Redis lock"
+    },
+    {
+      "kind": "paragraph",
+      "index": 100,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 101,
+      "style": "Normal",
+      "numbering": null,
+      "text": "ManagedSandbox.java:161-167, 365-580"
+    },
+    {
+      "kind": "paragraph",
+      "index": 102,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 103,
+      "style": "Normal",
+      "numbering": null,
+      "text": "8"
+    },
+    {
+      "kind": "paragraph",
+      "index": 104,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 105,
+      "style": "Normal",
+      "numbering": null,
+      "text": "路径越权防护"
+    },
+    {
+      "kind": "paragraph",
+      "index": 106,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 107,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxPathValidator"
+    },
+    {
+      "kind": "paragraph",
+      "index": 108,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 109,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxPathValidator.java:20-131"
+    },
+    {
+      "kind": "paragraph",
+      "index": 110,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 111,
+      "style": "Normal",
+      "numbering": null,
+      "text": "9"
+    },
+    {
+      "kind": "paragraph",
+      "index": 112,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 113,
+      "style": "Normal",
+      "numbering": null,
+      "text": "并发防重（三层 singleflight）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 114,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 115,
+      "style": "Normal",
+      "numbering": null,
+      "text": "connectSingleFlight() + INSTANCES + SandboxLifecycleLock"
+    },
+    {
+      "kind": "paragraph",
+      "index": 116,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 117,
+      "style": "Normal",
+      "numbering": null,
+      "text": "ManagedSandbox.java:775-793"
+    },
+    {
+      "kind": "paragraph",
+      "index": 118,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 119,
+      "style": "Normal",
+      "numbering": null,
+      "text": "10"
+    },
+    {
+      "kind": "paragraph",
+      "index": 120,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 121,
+      "style": "Normal",
+      "numbering": null,
+      "text": "异常自愈"
+    },
+    {
+      "kind": "paragraph",
+      "index": 122,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 123,
+      "style": "Normal",
+      "numbering": null,
+      "text": "routeToolError + invalidateSandboxConnect"
+    },
+    {
+      "kind": "paragraph",
+      "index": 124,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 125,
+      "style": "Normal",
+      "numbering": null,
+      "text": "ManagedSandbox.java:686-725"
+    },
+    {
+      "kind": "paragraph",
+      "index": 126,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 127,
+      "style": "Normal",
+      "numbering": null,
+      "text": "11"
+    },
+    {
+      "kind": "paragraph",
+      "index": 128,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 129,
+      "style": "Normal",
+      "numbering": null,
+      "text": "配额预检"
+    },
+    {
+      "kind": "paragraph",
+      "index": 130,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 131,
+      "style": "Normal",
+      "numbering": null,
+      "text": "ensureSingleAgentQuota()"
+    },
+    {
+      "kind": "paragraph",
+      "index": 132,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 133,
+      "style": "Normal",
+      "numbering": null,
+      "text": "ManagedSandbox.java:588-609"
+    },
+    {
+      "kind": "paragraph",
+      "index": 134,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 135,
+      "style": "Normal",
+      "numbering": null,
+      "text": "12"
+    },
+    {
+      "kind": "paragraph",
+      "index": 136,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 137,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Token 刷新"
+    },
+    {
+      "kind": "paragraph",
+      "index": 138,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 139,
+      "style": "Normal",
+      "numbering": null,
+      "text": "writeSandboxToken()"
+    },
+    {
+      "kind": "paragraph",
+      "index": 140,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 141,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxBootstrapper.java:186-204"
+    },
+    {
+      "kind": "paragraph",
+      "index": 142,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 143,
+      "style": "Normal",
+      "numbering": null,
+      "text": "3. 面试重点讲的技术亮点"
+    },
+    {
+      "kind": "paragraph",
+      "index": 144,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 145,
+      "style": "Normal",
+      "numbering": null,
+      "text": "🔥 亮点一：三级并发防重（简历核心）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 146,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 147,
+      "style": "Normal",
+      "numbering": null,
+      "text": "问题：同一 conversation 的多 tool_call、多请求同时来，不能重复建 sandbox，也不能重复 connect。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 148,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 149,
+      "style": "Normal",
+      "numbering": null,
+      "text": "方案（三层拦截）："
+    },
+    {
+      "kind": "paragraph",
+      "index": 150,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 151,
+      "style": "Normal",
+      "numbering": null,
+      "text": "层级"
+    },
+    {
+      "kind": "paragraph",
+      "index": 152,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 153,
+      "style": "Normal",
+      "numbering": null,
+      "text": "机制"
+    },
+    {
+      "kind": "paragraph",
+      "index": 154,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 155,
+      "style": "Normal",
+      "numbering": null,
+      "text": "目的"
+    },
+    {
+      "kind": "paragraph",
+      "index": 156,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 157,
+      "style": "Normal",
+      "numbering": null,
+      "text": "JVM 单例"
+    },
+    {
+      "kind": "paragraph",
+      "index": 158,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 159,
+      "style": "Normal",
+      "numbering": null,
+      "text": "INSTANCES = ConcurrentHashMap<Scope, ManagedSandbox> + synchronized(userContext) 双检锁（ManagedSandbox.java:140-156）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 160,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 161,
+      "style": "Normal",
+      "numbering": null,
+      "text": "进程内同 scope 只有 1 个 ManagedSandbox"
+    },
+    {
+      "kind": "paragraph",
+      "index": 162,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 163,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Reactor singleflight"
+    },
+    {
+      "kind": "paragraph",
+      "index": 164,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 165,
+      "style": "Normal",
+      "numbering": null,
+      "text": "connectInFlight Mono.cache() + 单调 connectInFlightSeq 序列号（ManagedSandbox.java:775-793）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 166,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 167,
+      "style": "Normal",
+      "numbering": null,
+      "text": "同一实例内并发 subscribe 共享一次建联"
+    },
+    {
+      "kind": "paragraph",
+      "index": 168,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 169,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Redis 分布式锁"
+    },
+    {
+      "kind": "paragraph",
+      "index": 170,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 171,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Squirrel SETNX + Lua compareAndDelete, TTL 180s（SandboxLifecycleLock.java:27-62）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 172,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 173,
+      "style": "Normal",
+      "numbering": null,
+      "text": "跨节点互斥 create/rebuild"
+    },
+    {
+      "kind": "paragraph",
+      "index": 174,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 175,
+      "style": "Normal",
+      "numbering": null,
+      "text": "精心设计的细节："
+    },
+    {
+      "kind": "paragraph",
+      "index": 176,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 177,
+      "style": "Normal",
+      "numbering": null,
+      "text": "锁 key = appId + \"_\" + storageBucketKey，粒度精准到 scope"
+    },
+    {
+      "kind": "paragraph",
+      "index": 178,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 179,
+      "style": "Normal",
+      "numbering": null,
+      "text": "不做 watchdog 续约——超时后其他节点走 double-check 路径能自愈"
+    },
+    {
+      "kind": "paragraph",
+      "index": 180,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 181,
+      "style": "Normal",
+      "numbering": null,
+      "text": "异常 fail-close——拿不到锁进 poll 等待而不是放行"
+    },
+    {
+      "kind": "paragraph",
+      "index": 182,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 183,
+      "style": "Normal",
+      "numbering": null,
+      "text": "🔥 亮点二：状态机 + Lease 复用"
+    },
+    {
+      "kind": "paragraph",
+      "index": 184,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 185,
+      "style": "Normal",
+      "numbering": null,
+      "text": "DB 三态 CREATING/RUNNING/FAILED，PAUSED 显式 @Deprecated（SandboxStateEnum.java:20-33）——项目主动关闭 SDK auto-pause 换稳定的 connect-first 语义"
+    },
+    {
+      "kind": "paragraph",
+      "index": 186,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 187,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Lease 机制：leaseExpireAt = lastActiveAt + (30min - 2min safety) = 28min，提前 120s 视为过期避临界实例"
+    },
+    {
+      "kind": "paragraph",
+      "index": 188,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 189,
+      "style": "Normal",
+      "numbering": null,
+      "text": "touchRunning 有 19 分钟 debounce，减少写库压力（SandboxConstant.java:19-27）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 190,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 191,
+      "style": "Normal",
+      "numbering": null,
+      "text": "热路径 99% 走 sandboxConnect != null && lease 有效 → Mono.empty()，无锁无 RPC"
+    },
+    {
+      "kind": "paragraph",
+      "index": 192,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 193,
+      "style": "Normal",
+      "numbering": null,
+      "text": "🔥 亮点三：路径安全（防 LLM 越权）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 194,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 195,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxPathValidator（纯本地校验，进任何 sandboxConnect 前先过）："
+    },
+    {
+      "kind": "paragraph",
+      "index": 196,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 197,
+      "style": "Normal",
+      "numbering": null,
+      "text": "containsTraversal：\\→/ 后按 / 分块，. .. 直接拒（SandboxPathValidator.java:92-100）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 198,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 199,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Paths.normalize().isAbsolute() 强制绝对路径"
+    },
+    {
+      "kind": "paragraph",
+      "index": 200,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 201,
+      "style": "Normal",
+      "numbering": null,
+      "text": "read/write 双 allowed-roots："
+    },
+    {
+      "kind": "paragraph",
+      "index": 202,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 203,
+      "style": "Normal",
+      "numbering": null,
+      "text": "read 白名单：[/home/user/friday/agent, /tmp]"
+    },
+    {
+      "kind": "paragraph",
+      "index": 204,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 205,
+      "style": "Normal",
+      "numbering": null,
+      "text": "write 白名单：[/tmp, temp/, archive/]，显式排除 skills 目录防 LLM 破坏 skill 文件"
+    },
+    {
+      "kind": "paragraph",
+      "index": 206,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 207,
+      "style": "Normal",
+      "numbering": null,
+      "text": "每一条拒绝返回带 code + message + hint 的结构化 SandboxToolException 让 LLM 可自纠错"
+    },
+    {
+      "kind": "paragraph",
+      "index": 208,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 209,
+      "style": "Normal",
+      "numbering": null,
+      "text": "🔥 亮点四：S3fs 持久化（工程量最大的一块）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 210,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 211,
+      "style": "Normal",
+      "numbering": null,
+      "text": "为什么用 s3fs 而不是 S3 SDK："
+    },
+    {
+      "kind": "paragraph",
+      "index": 212,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 213,
+      "style": "Normal",
+      "numbering": null,
+      "text": "FUSE 透明——shell/python open() 直接用，不用教 LLM \"please use boto3\""
+    },
+    {
+      "kind": "paragraph",
+      "index": 214,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 215,
+      "style": "Normal",
+      "numbering": null,
+      "text": "本地 pagecache 读吞吐高，stat_cache_expire=60s / attr_timeout=30s 减少 head-object 请求，适合 git status 类频繁 stat"
+    },
+    {
+      "kind": "paragraph",
+      "index": 216,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 217,
+      "style": "Normal",
+      "numbering": null,
+      "text": "沙箱销毁重建后 s3fs bucket:/prefix /mount 数据立刻回来，用户零感知"
+    },
+    {
+      "kind": "paragraph",
+      "index": 218,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 219,
+      "style": "Normal",
+      "numbering": null,
+      "text": "两阶段并行 bootstrap（SandboxBootstrapper.java:69-83）："
+    },
+    {
+      "kind": "paragraph",
+      "index": 220,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 221,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Phase 1 (并行): initWorkspace + writeS3Credentials + checkS3fsAvailable"
+    },
+    {
+      "kind": "paragraph",
+      "index": 222,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Phase 2 (并行): mountS3 + injectSandboxAuth"
+    },
+    {
+      "kind": "paragraph",
+      "index": 223,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 224,
+      "style": "Normal",
+      "numbering": null,
+      "text": "mountS3 三重兜底：mountpoint -q 已挂载则跳过 → sudo s3fs 挂载 → 再验证 mountpoint（防 s3fs 非零退出误判）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 225,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 226,
+      "style": "Normal",
+      "numbering": null,
+      "text": "injectSandboxAuth 通过 read-back 确认 token 写入成功，保证幂等"
+    },
+    {
+      "kind": "paragraph",
+      "index": 227,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 228,
+      "style": "Normal",
+      "numbering": null,
+      "text": "🔥 亮点五：异常分类 + 自愈"
+    },
+    {
+      "kind": "paragraph",
+      "index": 229,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 230,
+      "style": "Normal",
+      "numbering": null,
+      "text": "两种异常明确分工："
+    },
+    {
+      "kind": "paragraph",
+      "index": 231,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 232,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxToolException——业务错误（路径非法/文件不存在），toResponse(path) 转 JSON 给 LLM 自纠错"
+    },
+    {
+      "kind": "paragraph",
+      "index": 233,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 234,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxConnectException——连接层失败（轮询耗尽/create 失败/沙箱已销毁），向上抛触发 interruption"
+    },
+    {
+      "kind": "paragraph",
+      "index": 235,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 236,
+      "style": "Normal",
+      "numbering": null,
+      "text": "三分类路由（routeToolError，ManagedSandbox.java:686-725）："
+    },
+    {
+      "kind": "paragraph",
+      "index": 237,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 238,
+      "style": "Normal",
+      "numbering": null,
+      "text": "分类"
+    },
+    {
+      "kind": "paragraph",
+      "index": 239,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 240,
+      "style": "Normal",
+      "numbering": null,
+      "text": "处理"
+    },
+    {
+      "kind": "paragraph",
+      "index": 241,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 242,
+      "style": "Normal",
+      "numbering": null,
+      "text": "BUSINESS"
+    },
+    {
+      "kind": "paragraph",
+      "index": 243,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 244,
+      "style": "Normal",
+      "numbering": null,
+      "text": "直接返回 JSON 给 LLM"
+    },
+    {
+      "kind": "paragraph",
+      "index": 245,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 246,
+      "style": "Normal",
+      "numbering": null,
+      "text": "TRANSIENT"
+    },
+    {
+      "kind": "paragraph",
+      "index": 247,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 248,
+      "style": "Normal",
+      "numbering": null,
+      "text": "transientRetry() fixedDelay(2, 1.5s) 重试"
+    },
+    {
+      "kind": "paragraph",
+      "index": 249,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 250,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SANDBOX_INFRA"
+    },
+    {
+      "kind": "paragraph",
+      "index": 251,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 252,
+      "style": "Normal",
+      "numbering": null,
+      "text": "invalidateSandboxConnect() 清本地缓存 → 下次 ensureConnected 走 lifecycle lock rebuild"
+    },
+    {
+      "kind": "paragraph",
+      "index": 253,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 254,
+      "style": "Normal",
+      "numbering": null,
+      "text": "NOT_FOUND 语义歧义处理（SandboxUtils.java:245-271）：ConnectCode.NOT_FOUND 在 connect 阶段是\"沙箱销毁\"，在 exec 阶段是\"文件不存在\"——用 isSandboxNotFoundMessage() 匹配 SDK 三种措辞消息串精确区分，避免误 rebuild。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 255,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 256,
+      "style": "Normal",
+      "numbering": null,
+      "text": "🔥 亮点六：LLM Loop 中断机制（最容易被追问）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 257,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 258,
+      "style": "Normal",
+      "numbering": null,
+      "text": "问题：sandbox 完全不可用时，只返回 error string，LLM 会死循环反复调 sandbox 浪费 token。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 259,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 260,
+      "style": "Normal",
+      "numbering": null,
+      "text": "为什么不能抛异常？（SDK 有三层防御性吞没，handoff-review 里论证得很清楚）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 261,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 262,
+      "style": "Normal",
+      "numbering": null,
+      "text": "hook 异常 → onErrorResume(Mono.empty) 吞"
+    },
+    {
+      "kind": "paragraph",
+      "index": 263,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 264,
+      "style": "Normal",
+      "numbering": null,
+      "text": "tool 异常 → 包装成 FunctionToolResult(null, error) 当输出"
+    },
+    {
+      "kind": "paragraph",
+      "index": 265,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 266,
+      "style": "Normal",
+      "numbering": null,
+      "text": "最外层 handleToolExecutionError 兜底"
+    },
+    {
+      "kind": "paragraph",
+      "index": 267,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 268,
+      "style": "Normal",
+      "numbering": null,
+      "text": "唯一可行方案：SDK 的 InterruptionController"
+    },
+    {
+      "kind": "paragraph",
+      "index": 269,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 270,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SandboxHook.onToolStart() ensureConnected 失败"
+    },
+    {
+      "kind": "paragraph",
+      "index": 271,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  → toolContext.requestImmediateInterruption(\"沙箱不可用: \" + reason)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 272,
+      "style": "Normal",
+      "numbering": null,
+      "text": "    → interruptionSink.tryEmitNext 发射"
+    },
+    {
+      "kind": "paragraph",
+      "index": 273,
+      "style": "Normal",
+      "numbering": null,
+      "text": "      → AgentRunner.raceWithInterruption() 里的 Mono.firstWithSignal cancel mainFlow"
+    },
+    {
+      "kind": "paragraph",
+      "index": 274,
+      "style": "Normal",
+      "numbering": null,
+      "text": "        → handleInterruption() → publishEvent(InterruptionStreamEvent)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 275,
+      "style": "Normal",
+      "numbering": null,
+      "text": "          → AguiEventConverter.fromInterruption() → Flux.error"
+    },
+    {
+      "kind": "paragraph",
+      "index": 276,
+      "style": "Normal",
+      "numbering": null,
+      "text": "            → failRun(e) → 客户端收到 runError 事件"
+    },
+    {
+      "kind": "paragraph",
+      "index": 277,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 278,
+      "style": "Normal",
+      "numbering": null,
+      "text": "🔥 亮点七：Token 3h TTL vs Sandbox 30min idle 的 mismatch"
+    },
+    {
+      "kind": "paragraph",
+      "index": 279,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 280,
+      "style": "Normal",
+      "numbering": null,
+      "text": "问题：沙箱平台 idle 30min 销毁 vs agent token 3h 过期——两者对不上。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 281,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 282,
+      "style": "Normal",
+      "numbering": null,
+      "text": "解法：每次 connectExisting() health-check ok 分支仍无条件重写 token（ManagedSandbox.java:413），同时 connect 一次平台又把 idle reset——形成\"续命-刷新\"闭环。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 283,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 284,
+      "style": "Normal",
+      "numbering": null,
+      "text": "4. 数据流全链路（白板讲这段）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 285,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 286,
+      "style": "Normal",
+      "numbering": null,
+      "text": "[1] LLM: function_call(name=\"sandbox_exec\", arguments={\"command\": \"ls -la\"})"
+    },
+    {
+      "kind": "paragraph",
+      "index": 287,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 288,
+      "style": "Normal",
+      "numbering": null,
+      "text": "[2] SDK RunImpl.executeToolCall() → runToolStartHooks()"
+    },
+    {
+      "kind": "paragraph",
+      "index": 289,
+      "style": "Normal",
+      "numbering": null,
+      "text": "    → SandboxHook.onToolStart():"
+    },
+    {
+      "kind": "paragraph",
+      "index": 290,
+      "style": "Normal",
+      "numbering": null,
+      "text": "      ① 判断是不是 sandbox tool（CONNECT_REQUIRED_SANDBOX_TOOL_NAMES）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 291,
+      "style": "Normal",
+      "numbering": null,
+      "text": "      ② ManagedSandbox.fromContext(toolContext)："
+    },
+    {
+      "kind": "paragraph",
+      "index": 292,
+      "style": "Normal",
+      "numbering": null,
+      "text": "         computeIfAbsent(INSTANCES) + synchronized(userContext) 双检锁"
+    },
+    {
+      "kind": "paragraph",
+      "index": 293,
+      "style": "Normal",
+      "numbering": null,
+      "text": "      ③ ms.ensureConnected():"
+    },
+    {
+      "kind": "paragraph",
+      "index": 294,
+      "style": "Normal",
+      "numbering": null,
+      "text": "         ├─ 热路径: sandboxConnect != null && lease 有效 → Mono.empty()  ← 99% 走这"
+    },
+    {
+      "kind": "paragraph",
+      "index": 295,
+      "style": "Normal",
+      "numbering": null,
+      "text": "         └─ connectSingleFlight → doConnect → findBinding"
+    },
+    {
+      "kind": "paragraph",
+      "index": 296,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              ├─ binding==null (首次) → enterLifecycleLock (Redis SETNX)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 297,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              │    ├─ 抢到 → ensureSingleAgentQuota → doCreateFresh"
+    },
+    {
+      "kind": "paragraph",
+      "index": 298,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              │    │       ├─ SandboxFactory.create(scope)  ← me2b SDK"
+    },
+    {
+      "kind": "paragraph",
+      "index": 299,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              │    │       ├─ saveSandboxId → bootstrapFully → markRunning"
+    },
+    {
+      "kind": "paragraph",
+      "index": 300,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              │    │       └─ cacheConnectedSandbox"
+    },
+    {
+      "kind": "paragraph",
+      "index": 301,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              │    └─ 没抢到 → pollUntilReady 20s 轮询"
+    },
+    {
+      "kind": "paragraph",
+      "index": 302,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              ├─ 已有 sandboxId → connectExisting"
+    },
+    {
+      "kind": "paragraph",
+      "index": 303,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              │    ├─ SandboxFactory.connect(sandboxId)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 304,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              │    ├─ healthCheck (mountpoint -q temp && ls && archive)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 305,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              │    │   ├─ ok → writeSandboxToken 刷新"
+    },
+    {
+      "kind": "paragraph",
+      "index": 306,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              │    │   └─ fail → bootstrap"
+    },
+    {
+      "kind": "paragraph",
+      "index": 307,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              │    └─ cacheConnectedSandbox"
+    },
+    {
+      "kind": "paragraph",
+      "index": 308,
+      "style": "Normal",
+      "numbering": null,
+      "text": "              └─ 失败 → shouldAttemptRebuild → 自动重建 or SandboxConnectException"
+    },
+    {
+      "kind": "paragraph",
+      "index": 309,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 310,
+      "style": "Normal",
+      "numbering": null,
+      "text": "[3] SDK 调 FunctionTool.asyncFunction:"
+    },
+    {
+      "kind": "paragraph",
+      "index": 311,
+      "style": "Normal",
+      "numbering": null,
+      "text": "    SandboxTools.EXEC.asyncFunction(input, ctx)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 312,
+      "style": "Normal",
+      "numbering": null,
+      "text": "      → getSandbox(ctx).exec(cmd, cwd, timeoutSec, truncateBytes)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 313,
+      "style": "Normal",
+      "numbering": null,
+      "text": "        ├─ SandboxPathValidator.validateExecCwd"
+    },
+    {
+      "kind": "paragraph",
+      "index": 314,
+      "style": "Normal",
+      "numbering": null,
+      "text": "        ├─ clamp timeout ≤ 900s、truncate ≤ 20KB"
+    },
+    {
+      "kind": "paragraph",
+      "index": 315,
+      "style": "Normal",
+      "numbering": null,
+      "text": "        ├─ sandboxConnect.getCommands().run(...)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 316,
+      "style": "Normal",
+      "numbering": null,
+      "text": "        ├─ truncateCommandOutput"
+    },
+    {
+      "kind": "paragraph",
+      "index": 317,
+      "style": "Normal",
+      "numbering": null,
+      "text": "        ├─ retryWhen(transientRetry) 2 次 × 1.5s"
+    },
+    {
+      "kind": "paragraph",
+      "index": 318,
+      "style": "Normal",
+      "numbering": null,
+      "text": "        └─ onErrorResume(routeToolError) 分类处理"
+    },
+    {
+      "kind": "paragraph",
+      "index": 319,
+      "style": "Normal",
+      "numbering": null,
+      "text": "      → return JSON{exitCode, stdout, stderr, truncated, cwd}"
+    },
+    {
+      "kind": "paragraph",
+      "index": 320,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 321,
+      "style": "Normal",
+      "numbering": null,
+      "text": "[4] SDK: FunctionToolResult(error=null, result=json)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 322,
+      "style": "Normal",
+      "numbering": null,
+      "text": "    → 写入 conversationContext"
+    },
+    {
+      "kind": "paragraph",
+      "index": 323,
+      "style": "Normal",
+      "numbering": null,
+      "text": "    → 作为 tool result 给下一轮 LLM"
+    },
+    {
+      "kind": "paragraph",
+      "index": 324,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 325,
+      "style": "Normal",
+      "numbering": null,
+      "text": "5. 简历 bullet（3 条，60 字左右，可填数字）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 326,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 327,
+      "style": "Normal",
+      "numbering": null,
+      "text": "【架构与并发】 基于 DDD 分层设计 Deep Agent 沙箱子系统，通过 JVM 单例 registry + Reactor Mono singleflight + Squirrel Redis 分布式锁三级互斥，在 xxx QPS 下同会话并发场景零重复创建。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 328,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 329,
+      "style": "Normal",
+      "numbering": null,
+      "text": "【持久化与冷启】 用 s3fs FUSE 把沙箱工作目录挂载到 S3，两阶段并行 bootstrap（initWorkspace / mountS3 / injectAuth），支持沙箱销毁后工作目录零感知恢复，冷启动 30s → xxx s，token 全自动续期。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 330,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 331,
+      "style": "Normal",
+      "numbering": null,
+      "text": "【安全与自愈】 设计 read/write 双 allowed-roots 白名单 + path traversal 拦截防 LLM 越权；按 Business/Transient/SandboxInfra 三类分流异常，基于 InterruptionController 实现 sandbox 不可用时 agent loop 瞬时中断，避免死循环浪费 token。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 332,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 333,
+      "style": "Normal",
+      "numbering": null,
+      "text": "6. 面试官高概率追问题清单"
+    },
+    {
+      "kind": "paragraph",
+      "index": 334,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 335,
+      "style": "Normal",
+      "numbering": null,
+      "text": "1. 锁是分布式的吗？节点崩了怎么办？→ Squirrel（Redis）SETNX，TTL 180s 自动过期；不做 watchdog 续约，靠 double-check 自愈。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 336,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 337,
+      "style": "Normal",
+      "numbering": null,
+      "text": "2. S3fs 比直接 S3 SDK 强在哪？→ FUSE 透明，shell/python 无需适配；本地 pagecache 读吞吐高；stat_cache 减少 head-object 请求。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 338,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 339,
+      "style": "Normal",
+      "numbering": null,
+      "text": "3. token 3h vs sandbox 30min 怎么 match？→ 每次 connectExisting health-ok 分支无条件重写 token，同时 connect 一次 idle 又 reset，形成闭环。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 340,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 341,
+      "style": "Normal",
+      "numbering": null,
+      "text": "4. routeToolError 为什么走 Mono.error 而不是直接 interrupt？→ ManagedSandbox 里的 tool 函数不持有 ToolCallContext 引用，只能靠 SandboxHook 下一次 onToolStart 触发。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 342,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 343,
+      "style": "Normal",
+      "numbering": null,
+      "text": "5. NOT_FOUND 在 connect 和 exec 阶段语义不同怎么处理？→ classifyConnectException + isSandboxNotFoundMessage 用消息串精确区分，避免误 rebuild。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 344,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 345,
+      "style": "Normal",
+      "numbering": null,
+      "text": "6. binding 表会不会一直膨胀？→ 唯一键 (app_id, bucket_key) 决定同 scope 复用一行；失活 binding 无 sweeper，靠下次 connect 失败 lazy rebuild 覆盖 sandboxId。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 346,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 347,
+      "style": "Normal",
+      "numbering": null,
+      "text": "7. 热路径的 synchronized 会不会成瓶颈？→ 热路径只有 volatile 读 + LocalDateTime.now() lease 比对，不进 sync 块；touchRunning 19min debounce 避免频繁写 DB。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 348,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 349,
+      "style": "Normal",
+      "numbering": null,
+      "text": "8. onToolError 为空 no-op 靠不靠谱？→ SandboxHook Javadoc 里引用了 SDK 三处源码位置论证 asyncFunction 路径异常必被吞；若 SDK 升级行为变化，现象是 LLM 看到 fail 而不是 fail string，可秒级定位。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 350,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 351,
+      "style": "Normal",
+      "numbering": null,
+      "text": "9. INSTANCES registry 1000 上限怎么定的？→ 经验值，单实例 KB 级 × 1000 = MB 级内存，超限走 LRU；有 registrySize() 观测接口，可按 QPS 微调。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 352,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 353,
+      "style": "Normal",
+      "numbering": null,
+      "text": "10. ensureSingleAgentQuota list 失败降级放行会不会超限？→ 权衡 list 抖动不能挂业务；singleAgentMaxRunningCount=50 配得比平台真实配额小，平台侧硬限兜底。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 354,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 355,
+      "style": "Normal",
+      "numbering": null,
+      "text": "11. exec 非零 exit 是业务错还是 infra 错？→ BUSINESS，包装成 {exitCode, stdout, stderr} 给 LLM（grep 没命中也是 exit 1）。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 356,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 357,
+      "style": "Normal",
+      "numbering": null,
+      "text": "12. CAS 释放锁会不会误删别人的？→ Lua compareAndDelete 严格匹配 ownerId（UUID），TTL 提前到期被抢走时 CAS 返回 false → warn 日志不真删。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 358,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 359,
+      "style": "Normal",
+      "numbering": null,
+      "text": "13. 为什么不直接用 JVM synchronized？→ 多 JVM 部署，synchronized(this) 只在单进程有效；跨节点必须 Redis 锁。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 360,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 361,
+      "style": "Normal",
+      "numbering": null,
+      "text": "14. pollUntilReady 为什么用 repeatWhenEmpty 不用定时轮询？→ repeatWhenEmpty + delayElements(1s) + take(20) + timeout(21s) 双上限兜底，防配错无限等。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 362,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 363,
+      "style": "Normal",
+      "numbering": null,
+      "text": "15. AG-UI interruption 为什么用 Flux.error 不用普通 event？→ AG-UI 协议里 runError 是终止事件，通过 failRun(e) 触发，语义上 interruption 属于\"不可恢复 run error\"。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 364,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 365,
+      "style": "Normal",
+      "numbering": null,
+      "text": "📎 面试准备建议"
+    },
+    {
+      "kind": "paragraph",
+      "index": 366,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 367,
+      "style": "Normal",
+      "numbering": null,
+      "text": "上台前把以下三段能不看稿讲下来："
+    },
+    {
+      "kind": "paragraph",
+      "index": 368,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 369,
+      "style": "Normal",
+      "numbering": null,
+      "text": "亮点一 （三级 singleflight）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 370,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 371,
+      "style": "Normal",
+      "numbering": null,
+      "text": "亮点四 （s3fs bootstrap）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 372,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 373,
+      "style": "Normal",
+      "numbering": null,
+      "text": "亮点六 （InterruptionController）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 374,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 375,
+      "style": "Normal",
+      "numbering": null,
+      "text": "加上\"数据流全链路\"这段能白板画出来，基本能覆盖 80% 的追问路径。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 376,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 377,
+      "style": "Heading 1",
+      "numbering": null,
+      "text": "7-10"
+    },
+    {
+      "kind": "paragraph",
+      "index": 378,
+      "style": "Normal",
+      "numbering": null,
+      "text": "LLM usage 你知道"
+    },
+    {
+      "kind": "paragraph",
+      "index": 379,
+      "style": "Normal",
+      "numbering": null,
+      "text": "MQ 重投 是消息队列Mafka（团子自己的）类似的有rabbitmq和kafka"
+    },
+    {
+      "kind": "paragraph",
+      "index": 380,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Squirrel同理是美团redis，topic是MQ消息队列的概念"
+    },
+    {
+      "kind": "paragraph",
+      "index": 381,
+      "style": "Normal",
+      "numbering": null,
+      "text": "SQL不说了，UNIQUE KEY + INSERT IGNORE是数据库SQL的"
+    },
+    {
+      "kind": "paragraph",
+      "index": 382,
+      "style": "Normal",
+      "numbering": null,
+      "text": "CAS的话是自旋锁，java必学，go我不清楚但锁的概念应该都会有"
+    },
+    {
+      "kind": "paragraph",
+      "index": 383,
+      "style": "Heading 1",
+      "numbering": null,
+      "text": "7-7"
+    },
+    {
+      "kind": "paragraph",
+      "index": 384,
+      "style": "Normal",
+      "numbering": null,
+      "text": "friday 沙箱，定时任务，mcp，tools，bug排查"
+    },
+    {
+      "kind": "paragraph",
+      "index": 385,
+      "style": "Normal",
+      "numbering": null,
+      "text": "longcat 线上SQL，Redis，mafka，lion，crane配置，邮件预警部分，海外订单问卷+学一个token计费有技术的点"
+    },
+    {
+      "kind": "paragraph",
+      "index": 386,
+      "style": "Normal",
+      "numbering": null,
+      "text": "大模型评测 随便干吧两点（感觉没什么技术问题，完全是一个流程去干就完了，然后上线模型）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 387,
+      "style": "Heading 1",
+      "numbering": null,
+      "text": "7-10"
+    },
+    {
+      "kind": "paragraph",
+      "index": 388,
+      "style": "Normal",
+      "numbering": null,
+      "text": "2026/06-2026-09                         美团                     longcat.ai商业化"
+    },
+    {
+      "kind": "paragraph",
+      "index": 389,
+      "style": "Normal",
+      "numbering": null,
+      "text": "- 参与 LLM usage 计费扣减链路建设，围绕 MQ 重投、请求重试和并发竞争设计多层幂等机制，保障同一 usage 只被扣减一次；实现 prepaid / paygo 混合记账、账户余额更新以及 usage 总账与拆账明细落库，支撑账单、退款和对账等核心场景。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 390,
+      "style": "Normal",
+      "numbering": null,
+      "text": "- 独立完成 Token 余量邮件告警闭环建设，基于 mail-sdk、Mafka 回调与 Squirrel 状态机实现可靠通知链路，通过投递终态确认、日级去重和失败分类处理避免重复触达；同时优化共享 topic 过滤与批扫 SQL / 索引方案，提升告警链路稳定性与扫描效率。                                                                                                                                                                     "
+    },
+    {
+      "kind": "paragraph",
+      "index": 391,
+      "style": "Normal",
+      "numbering": null,
+      "text": "- 独立完成海外支付流失用户问卷补救链路建设，基于海外身份与商业订单状态实现精准触达，通过 UNIQUE KEY + INSERT IGNORE + CAS UPDATE 保证问卷展示与提交幂等；提交后联动 quota 发放赠送加油包，回写发放状态、lotId、与失败原因，并接入监控日志告警及管理后台补发机制，形成完整的转化补救闭环。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 392,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 393,
+      "style": "Heading 1",
+      "numbering": null,
+      "text": "6-8"
+    },
+    {
+      "kind": "paragraph",
+      "index": 394,
+      "style": "Normal",
+      "numbering": null,
+      "text": "项目细节"
+    },
+    {
+      "kind": "paragraph",
+      "index": 395,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 396,
+      "style": "Normal",
+      "numbering": null,
+      "text": "agent鉴权"
+    },
+    {
+      "kind": "paragraph",
+      "index": 397,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 398,
+      "style": "Normal",
+      "numbering": null,
+      "text": "包括验票，换票，取票等"
+    },
+    {
+      "kind": "paragraph",
+      "index": 399,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 400,
+      "style": "Normal",
+      "numbering": null,
+      "text": "是为了解决定时任务执行时，需要获得访问ai的权限，因为非人执行，无法人工授权。所以对比传统Oauth鉴权，这里需要使用CIBA鉴权方式，"
+    },
+    {
+      "kind": "paragraph",
+      "index": 401,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 402,
+      "style": "Normal",
+      "numbering": null,
+      "text": "CIBA使用accessToken（访问权限，3天过期，为了安全） 和 refreshToken（可以从CIBA中获取新的accessToken的访问权限，14天过期，为了用户体验）每次chat都会更新refreshToken和accessToken，14天不与机器人聊天，定时任务就会鉴权失败报错，并推送消息到大象端"
+    },
+    {
+      "kind": "paragraph",
+      "index": 403,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 404,
+      "style": "Normal",
+      "numbering": null,
+      "text": "还有就是取票，取票的话，身份是机器人自身，通过自身ID和secret换取一个token，是一个更小的权限范围"
+    },
+    {
+      "kind": "paragraph",
+      "index": 405,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 406,
+      "style": "Normal",
+      "numbering": null,
+      "text": "验票：根据输入的token解析出mis和人的信息？"
+    },
+    {
+      "kind": "paragraph",
+      "index": 407,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 408,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 409,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 410,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 411,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 412,
+      "style": "Normal",
+      "numbering": null,
+      "text": "数据库表设计"
+    },
+    {
+      "kind": "paragraph",
+      "index": 413,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 414,
+      "style": "Normal",
+      "numbering": null,
+      "text": "仔细研究会发现两个表都有task_id且一个task_id都只有一条数据，很明显一张表更合理（如果QPS极高或者数据表列非常多等才需要拆表的其实）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 415,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 416,
+      "style": "Normal",
+      "numbering": null,
+      "text": "但是表中数据可能决定了某些数据高频访问，某些数据低频访问，拆开。还有就是大字段prompt和payload存入冷表，由于buffer pool（缓冲区）的大小有限，不用处理大字段，能够降低扫表时innodb的I/O次数，提高效率"
+    },
+    {
+      "kind": "paragraph",
+      "index": 417,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 418,
+      "style": "Normal",
+      "numbering": null,
+      "text": "表"
+    },
+    {
+      "kind": "paragraph",
+      "index": 419,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 420,
+      "style": "Normal",
+      "numbering": null,
+      "text": "定位"
+    },
+    {
+      "kind": "paragraph",
+      "index": 421,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 422,
+      "style": "Normal",
+      "numbering": null,
+      "text": "写入频率"
+    },
+    {
+      "kind": "paragraph",
+      "index": 423,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 424,
+      "style": "Normal",
+      "numbering": null,
+      "text": "典型操作"
+    },
+    {
+      "kind": "paragraph",
+      "index": 425,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 426,
+      "style": "Normal",
+      "numbering": null,
+      "text": "deepagent_cron_task"
+    },
+    {
+      "kind": "paragraph",
+      "index": 427,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 428,
+      "style": "Normal",
+      "numbering": null,
+      "text": "任务定义"
+    },
+    {
+      "kind": "paragraph",
+      "index": 429,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 430,
+      "style": "Normal",
+      "numbering": null,
+      "text": "低频（创建/编辑）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 431,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 432,
+      "style": "Normal",
+      "numbering": null,
+      "text": "用户管理 CRUD"
+    },
+    {
+      "kind": "paragraph",
+      "index": 433,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 434,
+      "style": "Normal",
+      "numbering": null,
+      "text": "deepagent_cron_task_state"
+    },
+    {
+      "kind": "paragraph",
+      "index": 435,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 436,
+      "style": "Normal",
+      "numbering": null,
+      "text": "运行状态"
+    },
+    {
+      "kind": "paragraph",
+      "index": 437,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 438,
+      "style": "Normal",
+      "numbering": null,
+      "text": "高频（每次执行）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 439,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 440,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Crane 扫表、执行结果更新"
+    },
+    {
+      "kind": "paragraph",
+      "index": 441,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 442,
+      "style": "Normal",
+      "numbering": null,
+      "text": "创建任务时在同一事务中 INSERT 两张表；Crane 扫描只查 state 表，命中后按 task_id 回查 task 表获取 prompt、payload 等信息构建回调请求。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 443,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 444,
+      "style": "Normal",
+      "numbering": null,
+      "text": "任务定义表：deepagent_cron_task"
+    },
+    {
+      "kind": "paragraph",
+      "index": 445,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 446,
+      "style": "Normal",
+      "numbering": null,
+      "text": "任务定义与运行状态拆分为两张表。定义表存储低频写入的任务配置，创建后基本不变；状态表存储高频写入的调度运行数据，每次执行都会更新。拆分后 Crane 扫表只查状态表（行小、索引覆盖度高），执行更新只锁状态行（不影响用户管理操作）。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 447,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 448,
+      "style": "Normal",
+      "numbering": null,
+      "text": "代码块"
+    },
+    {
+      "kind": "paragraph",
+      "index": 449,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 450,
+      "style": "Normal",
+      "numbering": null,
+      "text": "CREATE TABLE deepagent_cron_task ("
+    },
+    {
+      "kind": "paragraph",
+      "index": 451,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  id               BIGINT        NOT NULL AUTO_INCREMENT    COMMENT '物理主键（自增）',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 452,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  task_id          BIGINT        NOT NULL                   COMMENT '业务主键（Leaf Snowflake，key: pingtai.assistant.cron.task）',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 453,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  task_name        VARCHAR(100)  NOT NULL                   COMMENT '任务名称',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 454,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  description      VARCHAR(500)                             COMMENT '任务描述',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 455,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  space_id         VARCHAR(64)   NOT NULL DEFAULT 'DEFAULT' COMMENT '空间ID，外部任务默认 DEFAULT',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 456,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  app_id           VARCHAR(64)   NOT NULL                   COMMENT '目标 Agent 应用ID',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 457,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  prompt           TEXT          NOT NULL                   COMMENT '触发提示词',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 458,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 459,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  -- 调度配置"
+    },
+    {
+      "kind": "paragraph",
+      "index": 460,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  task_type        VARCHAR(16)   NOT NULL DEFAULT 'CRON'    COMMENT '任务类型：CRON / AT / INTERVAL',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 461,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  rrule_expression VARCHAR(256)  NOT NULL                   COMMENT 'RRule 表达式（iCalendar 格式）。AT 类型含 DTSTART+COUNT=1；CRON/INTERVAL 类型仅含 RRULE，不含 DTSTART',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 462,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  timezone         VARCHAR(64)   DEFAULT 'Asia/Shanghai'    COMMENT '时区（RRule DTSTART 的解释时区）',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 463,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 464,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  -- 鉴权信息"
+    },
+    {
+      "kind": "paragraph",
+      "index": 465,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  exec_user_id     VARCHAR(64)   NOT NULL                   COMMENT '执行用户 ID',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 466,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  exec_user_type   VARCHAR(32)   DEFAULT 'MIS'              COMMENT '执行身份类型',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 467,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  subject          VARCHAR(128)  NOT NULL DEFAULT ''         COMMENT '身份主体：ACCOUNT时为MIS号，APPLICATION时为clientId',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 468,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  subject_type     VARCHAR(32)   NOT NULL                   COMMENT '主体类型：ACCOUNT / APPLICATION',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 469,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  source_channel   VARCHAR(32)   NOT NULL                   COMMENT '创建时的接入渠道，运行时复用',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 470,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 471,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  -- 任务来源"
+    },
+    {
+      "kind": "paragraph",
+      "index": 472,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  task_source      VARCHAR(32)   NOT NULL DEFAULT 'INTERNAL' COMMENT '任务来源枚举：INTERNAL=DeepAgent内部 / LONGCAT=LongCat.ai',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 473,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 474,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  -- 运行时载荷（JSON，创建时写入，运行时原样透传给回调接口）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 475,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  payload          TEXT                                     COMMENT '运行时载荷（JSON），透传给回调接口',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 476,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 477,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  -- 通用字段"
+    },
+    {
+      "kind": "paragraph",
+      "index": 478,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  creator          VARCHAR(64)   NOT NULL                   COMMENT '创建者',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 479,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  updater          VARCHAR(64)                              COMMENT '最后修改人',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 480,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  create_time      DATETIME      DEFAULT CURRENT_TIMESTAMP,"
+    },
+    {
+      "kind": "paragraph",
+      "index": 481,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  update_time      DATETIME      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+    },
+    {
+      "kind": "paragraph",
+      "index": 482,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  deleted          TINYINT(1)    DEFAULT 0                  COMMENT '软删除',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 483,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 484,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  PRIMARY KEY (id),"
+    },
+    {
+      "kind": "paragraph",
+      "index": 485,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  UNIQUE INDEX uk_task_id (task_id),"
+    },
+    {
+      "kind": "paragraph",
+      "index": 486,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  INDEX idx_source_app (task_source, app_id),"
+    },
+    {
+      "kind": "paragraph",
+      "index": 487,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  INDEX idx_exec_user (task_source, exec_user_id, app_id)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 488,
+      "style": "Normal",
+      "numbering": null,
+      "text": ");"
+    },
+    {
+      "kind": "paragraph",
+      "index": 489,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 490,
+      "style": "Normal",
+      "numbering": null,
+      "text": "任务状态表：deepagent_cron_task_state"
+    },
+    {
+      "kind": "paragraph",
+      "index": 491,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 492,
+      "style": "Normal",
+      "numbering": null,
+      "text": "代码块"
+    },
+    {
+      "kind": "paragraph",
+      "index": 493,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 494,
+      "style": "Normal",
+      "numbering": null,
+      "text": "CREATE TABLE deepagent_cron_task_state ("
+    },
+    {
+      "kind": "paragraph",
+      "index": 495,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  id               BIGINT        NOT NULL AUTO_INCREMENT    COMMENT '物理主键（自增）',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 496,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  task_id          BIGINT        NOT NULL                   COMMENT '关联 deepagent_cron_task.task_id',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 497,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 498,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  enabled          TINYINT(1)    DEFAULT 1                  COMMENT '是否启用：1=是 0=否',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 499,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  auth_status      TINYINT       DEFAULT 1                  COMMENT '授权状态：1=正常 2=授权过期',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 500,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  subject_type     VARCHAR(32)   NOT NULL                   COMMENT '冗余自 task 表（创建时同步写入，不可变，与 task 表同生命周期）',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 501,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  next_run_time    DATETIME                                 COMMENT '下次执行时间',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 502,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  last_run_time    DATETIME                                 COMMENT '上次执行时间',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 503,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  run_count        INT           DEFAULT 0                  COMMENT '已执行次数',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 504,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  last_conv_id     VARCHAR(128)                             COMMENT '最近一次会话 ID（内部任务回写，外部任务可为 NULL）',"
+    },
+    {
+      "kind": "paragraph",
+      "index": 505,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 506,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  create_time      DATETIME      DEFAULT CURRENT_TIMESTAMP"
+    },
+    {
+      "kind": "paragraph",
+      "index": 507,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  update_time      DATETIME      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+    },
+    {
+      "kind": "paragraph",
+      "index": 508,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 509,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  PRIMARY KEY (id),"
+    },
+    {
+      "kind": "paragraph",
+      "index": 510,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  UNIQUE INDEX uk_task_id (task_id),"
+    },
+    {
+      "kind": "paragraph",
+      "index": 511,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  INDEX idx_next_run (next_run_time, enabled)"
+    },
+    {
+      "kind": "paragraph",
+      "index": 512,
+      "style": "Normal",
+      "numbering": null,
+      "text": ");"
+    },
+    {
+      "kind": "paragraph",
+      "index": 513,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 514,
+      "style": "Normal",
+      "numbering": null,
+      "text": "拆表说明："
+    },
+    {
+      "kind": "paragraph",
+      "index": 515,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 516,
+      "style": "Normal",
+      "numbering": null,
+      "text": "表"
+    },
+    {
+      "kind": "paragraph",
+      "index": 517,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 518,
+      "style": "Normal",
+      "numbering": null,
+      "text": "定位"
+    },
+    {
+      "kind": "paragraph",
+      "index": 519,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 520,
+      "style": "Normal",
+      "numbering": null,
+      "text": "写入频率"
+    },
+    {
+      "kind": "paragraph",
+      "index": 521,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 522,
+      "style": "Normal",
+      "numbering": null,
+      "text": "典型操作"
+    },
+    {
+      "kind": "paragraph",
+      "index": 523,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 524,
+      "style": "Normal",
+      "numbering": null,
+      "text": "deepagent_cron_task"
+    },
+    {
+      "kind": "paragraph",
+      "index": 525,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 526,
+      "style": "Normal",
+      "numbering": null,
+      "text": "任务定义"
+    },
+    {
+      "kind": "paragraph",
+      "index": 527,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 528,
+      "style": "Normal",
+      "numbering": null,
+      "text": "低频（创建/编辑）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 529,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 530,
+      "style": "Normal",
+      "numbering": null,
+      "text": "用户管理 CRUD"
+    },
+    {
+      "kind": "paragraph",
+      "index": 531,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 532,
+      "style": "Normal",
+      "numbering": null,
+      "text": "deepagent_cron_task_state"
+    },
+    {
+      "kind": "paragraph",
+      "index": 533,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 534,
+      "style": "Normal",
+      "numbering": null,
+      "text": "运行状态"
+    },
+    {
+      "kind": "paragraph",
+      "index": 535,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 536,
+      "style": "Normal",
+      "numbering": null,
+      "text": "高频（每次执行）"
+    },
+    {
+      "kind": "paragraph",
+      "index": 537,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 538,
+      "style": "Normal",
+      "numbering": null,
+      "text": "Crane 扫表、执行结果更新"
+    },
+    {
+      "kind": "paragraph",
+      "index": 539,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 540,
+      "style": "Normal",
+      "numbering": null,
+      "text": "创建任务时在同一事务中 INSERT 两张表；Crane 扫描只查 state 表，命中后按 task_id 回查 task 表获取 prompt、payload 等信息构建回调请求。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 541,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 542,
+      "style": "Normal",
+      "numbering": null,
+      "text": "payload 结构："
+    },
+    {
+      "kind": "paragraph",
+      "index": 543,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 544,
+      "style": "Normal",
+      "numbering": null,
+      "text": "payload 是创建时一次性写入、运行时原样透传的 JSON，schedule 不解析其内容，回调接口（Portal 或外部系统）负责提取并使用。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 545,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 546,
+      "style": "Normal",
+      "numbering": null,
+      "text": "对于内部任务（Portal），payload 中的字段对应 orchestratorChatRequestDto的可选参数："
+    },
+    {
+      "kind": "paragraph",
+      "index": 547,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 548,
+      "style": "Normal",
+      "numbering": null,
+      "text": "代码块"
+    },
+    {
+      "kind": "paragraph",
+      "index": 549,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 550,
+      "style": "Normal",
+      "numbering": null,
+      "text": "{"
+    },
+    {
+      "kind": "paragraph",
+      "index": 551,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  \"groupInfo\": {                    // DX_BOT/DX_APP 场景必需，其他渠道为 null"
+    },
+    {
+      "kind": "paragraph",
+      "index": 552,
+      "style": "Normal",
+      "numbering": null,
+      "text": "    \"groupId\": \"12345\","
+    },
+    {
+      "kind": "paragraph",
+      "index": 553,
+      "style": "Normal",
+      "numbering": null,
+      "text": "    \"groupType\": \"DX_GROUP\","
+    },
+    {
+      "kind": "paragraph",
+      "index": 554,
+      "style": "Normal",
+      "numbering": null,
+      "text": "    \"groupName\": \"研发群\""
+    },
+    {
+      "kind": "paragraph",
+      "index": 555,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  },"
+    },
+    {
+      "kind": "paragraph",
+      "index": 556,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  \"version\": \"v2\",                  // 可选，指定 agent 版本"
+    },
+    {
+      "kind": "paragraph",
+      "index": 557,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  \"businessParams\": { \"key\": \"value\" }, // 可选，业务随路参数"
+    },
+    {
+      "kind": "paragraph",
+      "index": 558,
+      "style": "Normal",
+      "numbering": null,
+      "text": "  \"apiKeyOverride\": \"billing_xxx\"       // 可选，计费 ID"
+    },
+    {
+      "kind": "paragraph",
+      "index": 559,
+      "style": "Normal",
+      "numbering": null,
+      "text": "}"
+    },
+    {
+      "kind": "paragraph",
+      "index": 560,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 561,
+      "style": "Normal",
+      "numbering": null,
+      "text": "headers字段不纳入 payload（如access-token是运行时请求上下文，执行时由 Portal 回调逻辑运行时生成）。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 562,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 563,
+      "style": "Normal",
+      "numbering": null,
+      "text": "对于外部任务（如 LONGCAT），payload 承载外部系统自定义的执行上下文，原样透传给外部系统回调接口。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 564,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 565,
+      "style": "Normal",
+      "numbering": null,
+      "text": "callback_url、callback_config、auth_probe_url不存储在数据库中，由 Lion 动态配置按task_source枚举维护路由映射：TaskSource → CallbackRoute(callbackUrl, authProbeUrl, callbackConfig)。配置 key 模板：assistant.schedule.cron.callback.route.{TASK_SOURCE}，值为 JSON（如{\"callbackUrl\":\"http://portal/api/cron-task/callback\",\"authProbeUrl\":\"http://portal/api/cron-task/auth-probe\"}）。新增接入方时扩展TaskSource枚举值 + 配置对应 Lion key 即可，无需发版。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 566,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 567,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 568,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 569,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 570,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 571,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 572,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 573,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 574,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 575,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 576,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 577,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 578,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 579,
+      "style": "Normal",
+      "numbering": null,
+      "text": "定时设计"
+    },
+    {
+      "kind": "paragraph",
+      "index": 580,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 581,
+      "style": "Normal",
+      "numbering": null,
+      "text": "rRule（支持更广）用于推算定时任务的下一次执行时间next_run_time，但不支持工作日执行"
+    },
+    {
+      "kind": "paragraph",
+      "index": 582,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 583,
+      "style": "Normal",
+      "numbering": null,
+      "text": "关键方案："
+    },
+    {
+      "kind": "paragraph",
+      "index": 584,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 585,
+      "style": "Normal",
+      "numbering": null,
+      "text": "需要每一年建模工作日休息日，使用定时任务每年12月底大模型websearch获取特殊工作日Set和特殊节假日Set（O（1）查询复杂度）+人工审核后，更新redis缓存；如果获取失败，获取不到，则需要推送告警消息。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 586,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 587,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 588,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 589,
+      "style": "Normal",
+      "numbering": null,
+      "text": "分两种情况1.工作日执行"
+    },
+    {
+      "kind": "paragraph",
+      "index": 590,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 591,
+      "style": "Normal",
+      "numbering": null,
+      "text": "2.每周三，自动跳过工作日"
+    },
+    {
+      "kind": "paragraph",
+      "index": 592,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 593,
+      "style": "Normal",
+      "numbering": null,
+      "text": "同种解决方案，但工作日这种就需要：日期不断+1，判断是否周一～周五。是周一～周五，判断是否为特殊节假日不是（周六，周日），判断是否为特殊工作日"
+    },
+    {
+      "kind": "paragraph",
+      "index": 594,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 595,
+      "style": "Normal",
+      "numbering": null,
+      "text": "每周三自动跳工作日：不断日期+7，判断是否工作日即可"
+    },
+    {
+      "kind": "paragraph",
+      "index": 596,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 597,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 598,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 599,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 600,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 601,
+      "style": "Normal",
+      "numbering": null,
+      "text": "回调方案："
+    },
+    {
+      "kind": "paragraph",
+      "index": 602,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 603,
+      "style": "Normal",
+      "numbering": null,
+      "text": "由于分为外部使用无法找到回调目标，所以需要提供回调url，后续需要接收方自行做代码处理。"
+    },
+    {
+      "kind": "paragraph",
+      "index": 604,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 605,
+      "style": "Normal",
+      "numbering": null,
+      "text": "而内部的话我们是通过给chat时传入的应用（机器人）ID发送消息，让他以他的身份或定时任务设定人的身份，执行一些操作完成任务。所以回调的时候走的是内部接口，无需额外设定，更加方便"
+    },
+    {
+      "kind": "paragraph",
+      "index": 606,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 607,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 608,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 609,
+      "style": "Normal",
+      "numbering": null,
+      "text": "会话隔离设计："
+    },
+    {
+      "kind": "paragraph",
+      "index": 610,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 611,
+      "style": "Normal",
+      "numbering": null,
+      "text": "定时任务开启新的回话完成，基于之前已有的scopekey进行改进，新增chatType=cron，chat:user123:cron123，来区分之前的回话"
+    },
+    {
+      "kind": "paragraph",
+      "index": 612,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 613,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 614,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 615,
+      "style": "Normal",
+      "numbering": null,
+      "text": "扫表与负载均衡"
+    },
+    {
+      "kind": "paragraph",
+      "index": 616,
+      "style": "Normal",
+      "numbering": null,
+      "text": ""
+    },
+    {
+      "kind": "paragraph",
+      "index": 617,
+      "style": "Normal",
+      "numbering": null,
+      "text": "在一台机器上进行数据表的扫描，把满足条件的任务查出（起初是最多400条，往后慢慢增多），调用Thrift接口，进行负载均衡处理，平均一台机器处理50条（往后逐渐增加）。每台机器会使用线程池处理"
+    }
+  ]
+}

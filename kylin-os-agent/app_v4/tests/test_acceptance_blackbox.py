@@ -10,12 +10,24 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import socket
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, AsyncIterator, Callable
 
+import httpx
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from pydantic import PrivateAttr
 
 
 # ---------------------------------------------------------------------------
@@ -232,8 +244,10 @@ class TestG5SSETokenStream:
     def test_sse_emits_token_events(self, client: TestClient):
         """SSE 必须包含多个 token 事件（来自模型 astream，非手工切字符串）。
 
-        token 来自规划节点（JSON plan）和总结节点（answer），
-        因此 token 拼接包含计划 JSON + 最终回答。
+        token 直接来自模型 astream 的原始输出（只读路径下为 decide 节点的
+        JSON action，如 {"action":"tool",...} / {"action":"final","answer":...}），
+        因此 token 拼接包含多轮 decide JSON，最终回答作为最后一轮 JSON 的
+        answer 字段出现在 token 流中。
         """
         events, done = self._collect_sse(client, "分析磁盘")
         token_events = [e for e in events if e.get("event") == "token"]
@@ -242,12 +256,14 @@ class TestG5SSETokenStream:
         token_text = "".join(e.get("delta", "") for e in token_events)
         assert token_text, "token 拼接结果应非空"
         assert done is not None, "应有 done 事件"
-        # 最终回答应出现在 token 流中（总结节点的 token 在 plan token 之后）
+        # 最终回答应出现在 token 流中（作为最后一轮 decide JSON 的 answer 字段）
         answer = done.get("answer", "")
         assert answer, "done 应含非空 answer"
-        # answer 的末尾部分应出现在 token 拼接的末尾
-        assert token_text.rstrip().endswith(answer.rstrip()), (
-            f"token 拼接末尾应包含 answer；token 尾={token_text[-40:]} answer={answer[-40:]}"
+        # answer 内容必须出现在 token 流中（客户端经 token 流收到回答），
+        # 但不再要求 token 流末尾严格等于 answer——模型 astream 产出的是完整
+        # JSON（含 } 闭合），answer 嵌在其中。
+        assert answer in token_text, (
+            f"answer 应出现在 token 流中；token 尾={token_text[-40:]} answer={answer[-40:]}"
         )
 
     def test_sse_reports_ttft_and_stats(self, client: TestClient):
@@ -271,37 +287,714 @@ class TestG5SSETokenStream:
             assert e["index"] == i, f"token index 应连续，第 {i} 个为 {e['index']}"
 
 
-class TestG5Cancellation:
-    """矩阵 #19：客户端取消后停止排出 token，发出 cancelled 事件。"""
+@dataclass(frozen=True)
+class _StreamProbeSpec:
+    token_count: int
+    delay_seconds: float
+    chunk_size: int = 24
+    fail_after: int | None = None
 
-    def test_cancel_stops_stream(self, client: TestClient):
-        """客户端中断后，streaming_agent 应停止排出 token（收到少量 token 后 cancelled）。"""
-        import json as _json
-        events = []
-        # 使用 stream + 提前关闭来模拟客户端取消
-        with client.stream("POST", "/api/chat/stream", json={"message": "分析磁盘"}) as resp:
-            assert resp.status_code == 200
-            count = 0
-            for line in resp.iter_lines():
-                if line.startswith("data: "):
-                    ev = _json.loads(line[len("data: "):])
-                    events.append(ev)
-                    if ev.get("event") == "token":
-                        count += 1
-                        # 收到 3 个 token 后模拟客户端断开（关闭连接）
-                        if count >= 3:
-                            break
-            # 关闭响应（模拟客户端断开）
-            resp.close()
 
-        token_events = [e for e in events if e.get("event") == "token"]
-        assert len(token_events) >= 3, f"取消前应已收到 >=3 个 token，得到 {len(token_events)}"
-        # 取消后不应再有大量 token（连接已断）
-        # 注意：由于是 break 后 close，服务端可能已产出更多 token 在 buffer 中，
-        # 但客户端已断开，不再读取。关键是客户端侧读取的 token 数有限。
-        assert len(token_events) <= 10, (
-            f"客户端断开后不应读取大量 token，实际读取 {len(token_events)}"
+@dataclass
+class _StreamProbeState:
+    """跨 Uvicorn 线程观察一次回答生成的完整生命周期。"""
+
+    started: threading.Event = field(default_factory=threading.Event)
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    finalized: threading.Event = field(default_factory=threading.Event)
+    completed: threading.Event = field(default_factory=threading.Event)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _produced: int = 0
+    _transitions: list[str] = field(default_factory=list, repr=False)
+
+    def mark(self, transition: str) -> None:
+        with self._lock:
+            self._transitions.append(transition)
+        {
+            "started": self.started,
+            "cancelled": self.cancelled,
+            "finally": self.finalized,
+            "completed": self.completed,
+        }[transition].set()
+
+    def increment(self) -> int:
+        with self._lock:
+            self._produced += 1
+            return self._produced
+
+    @property
+    def produced(self) -> int:
+        with self._lock:
+            return self._produced
+
+    @property
+    def transitions(self) -> list[str]:
+        with self._lock:
+            return list(self._transitions)
+
+
+class _LifecycleProbeModel(BaseChatModel):
+    """标准 BaseChatModel 探针，兼容 ainvoke 隐式流与显式 astream。
+
+    LangGraph 的流处理器在 ``model.ainvoke()`` 下会驱动 ``_astream``；当前
+    runner 的显式 ``model.astream()`` 也走同一实现。路由调用立即返回 consult，
+    只有含 ``stream-probe-<label>`` 的回答调用才进入可控慢生成。
+    """
+
+    _states: dict[str, _StreamProbeState] = PrivateAttr()
+    _specs: dict[str, _StreamProbeSpec] = PrivateAttr()
+
+    def __init__(
+        self,
+        states: dict[str, _StreamProbeState],
+        specs: dict[str, _StreamProbeSpec],
+    ) -> None:
+        super().__init__()
+        self._states = states
+        self._specs = specs
+
+    @property
+    def _llm_type(self) -> str:
+        return "sse-lifecycle-probe"
+
+    @staticmethod
+    def _is_route_call(messages) -> bool:
+        first = str(getattr(messages[0], "content", "")) if messages else ""
+        return "场景路由器" in first
+
+    def _label(self, messages) -> str | None:
+        prompt = "\n".join(str(getattr(message, "content", "")) for message in messages)
+        return next(
+            (
+                label
+                for label in self._specs
+                if f"stream-probe-{label}" in prompt
+            ),
+            None,
         )
+
+    @staticmethod
+    def _route_content() -> str:
+        return json.dumps(
+            {"route": "consult", "reason": "SSE lifecycle probe"},
+            ensure_ascii=False,
+        )
+
+    def _generate(self, messages, **kwargs) -> ChatResult:
+        """非流式兜底；流式验收必须由 ``_astream`` 设置生命周期事件。"""
+        if self._is_route_call(messages):
+            content = self._route_content()
+        else:
+            label = self._label(messages) or "unknown"
+            content = f"{label}:sync-fallback"
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content=content))]
+        )
+
+    async def _astream(self, messages, **kwargs):
+        if self._is_route_call(messages):
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(content=self._route_content())
+            )
+            return
+
+        label = self._label(messages)
+        if label is None:
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(content="unmarked-probe-response")
+            )
+            return
+
+        state = self._states[label]
+        spec = self._specs[label]
+        state.mark("started")
+        try:
+            for index in range(spec.token_count):
+                # 即使 delay=0 也显式交还事件循环，确保取消可传播。
+                await asyncio.sleep(spec.delay_seconds)
+                produced = state.increment()
+                prefix = f"{label}:{index:04d}:"
+                padding = "x" * max(0, spec.chunk_size - len(prefix))
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(content=prefix + padding)
+                )
+                assert produced <= spec.token_count
+                if spec.fail_after is not None and produced >= spec.fail_after:
+                    raise RuntimeError(f"probe failure after {produced} tokens")
+        except asyncio.CancelledError:
+            state.mark("cancelled")
+            raise
+        else:
+            state.mark("completed")
+        finally:
+            state.mark("finally")
+
+
+@dataclass(frozen=True)
+class _LiveProbeServer:
+    base_url: str
+    deps: Any
+
+
+def _wait_until(
+    predicate: Callable[[], bool],
+    *,
+    timeout: float,
+    message: str,
+    interval: float = 0.02,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    raise AssertionError(message)
+
+
+async def _wait_thread_event(
+    event: threading.Event,
+    *,
+    timeout: float,
+    message: str,
+) -> None:
+    observed = await asyncio.wait_for(
+        asyncio.to_thread(event.wait, timeout),
+        timeout=timeout + 0.2,
+    )
+    assert observed, message
+
+
+async def _iter_sse_events(response: httpx.Response) -> AsyncIterator[dict[str, Any]]:
+    async for line in response.aiter_lines():
+        if line.startswith("data: "):
+            yield json.loads(line[len("data: "):])
+
+
+async def _wait_for_production_plateau(
+    state: _StreamProbeState,
+    *,
+    timeout: float,
+    minimum: int,
+) -> int:
+    """等待快速模型因下游背压而停产，而不是依赖私有 queue 常量。"""
+    deadline = asyncio.get_running_loop().time() + timeout
+    previous = -1
+    stable_samples = 0
+    while asyncio.get_running_loop().time() < deadline:
+        current = state.produced
+        if state.completed.is_set():
+            raise AssertionError(
+                f"消费者暂停时模型跑完了全部 {current} 个 token，背压未生效"
+            )
+        if current >= minimum and current == previous:
+            stable_samples += 1
+        else:
+            stable_samples = 0
+        if stable_samples >= 4:
+            return current
+        previous = current
+        await asyncio.sleep(0.05)
+    raise AssertionError(
+        f"模型产量在 {timeout}s 内未形成平台，最后计数={state.produced}"
+    )
+
+
+def _wait_for_trace(deps, run_id: str, *, timeout: float) -> dict[str, Any]:
+    cell: dict[str, Any] = {}
+
+    def found() -> bool:
+        trace = deps.audit_logger.get_trace(run_id)
+        if trace is None:
+            return False
+        cell["trace"] = trace
+        return True
+
+    _wait_until(
+        found,
+        timeout=timeout,
+        message=f"run {run_id} 未在期限内写入 Trace",
+    )
+    return cell["trace"]
+
+
+@contextlib.contextmanager
+def _serve_probe_app(
+    tmp_path: Path,
+    model: _LifecycleProbeModel,
+) -> Any:
+    """在非 daemon 线程运行真实 Uvicorn TCP，并可靠回收 socket/线程。"""
+    from app_v4.container import build_dependencies
+    from app_v4.graph.runner import active_run_count, cleanup_all_runs
+    from app_v4.main import create_app
+    from app_v4.settings import Settings
+
+    settings = Settings(
+        use_fake_model=True,
+        rate_limit_enabled=False,
+        db_path=str(tmp_path / "agent_v4.db"),
+        kill_switch=False,
+    )
+    deps = build_dependencies(settings)
+    deps._model = model
+    app = create_app(settings=settings, dependencies=deps)
+
+    @contextlib.asynccontextmanager
+    async def probe_lifespan(_app):
+        """测试 app 自行关闭 aiosqlite worker，避免 pytest 结束后残留线程。"""
+        try:
+            yield
+        finally:
+            checkpointer = deps._async_checkpointer
+            if checkpointer is not None:
+                await checkpointer.conn.close()
+                deps._async_checkpointer = None
+
+    app.router.lifespan_context = probe_lifespan
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    port = listener.getsockname()[1]
+
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
+        access_log=False,
+        lifespan="on",
+        timeout_graceful_shutdown=2,
+    )
+    server = uvicorn.Server(config)
+    server_errors: list[BaseException] = []
+
+    def run_server() -> None:
+        try:
+            server.run(sockets=[listener])
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            server_errors.append(exc)
+
+    server_thread = threading.Thread(
+        target=run_server,
+        name="app-v4-sse-probe-server",
+        daemon=False,
+    )
+    server_thread.start()
+    try:
+        _wait_until(
+            lambda: server.started or bool(server_errors) or not server_thread.is_alive(),
+            timeout=5,
+            message="Uvicorn 未在 5s 内启动",
+        )
+        assert not server_errors, f"Uvicorn 启动失败: {server_errors!r}"
+        assert server.started and server_thread.is_alive()
+        yield _LiveProbeServer(
+            base_url=f"http://127.0.0.1:{port}",
+            deps=deps,
+        )
+    finally:
+        server.should_exit = True
+        server_thread.join(timeout=5)
+        if server_thread.is_alive():
+            server.force_exit = True
+            server_thread.join(timeout=2)
+        with contextlib.suppress(OSError):
+            listener.close()
+        assert not server_thread.is_alive(), "Uvicorn 非 daemon 线程未在期限内退出"
+        assert not server_errors, f"Uvicorn 线程异常: {server_errors!r}"
+        # 仅作失败路径卫生清理；每个测试在离开上下文前都独立断言归零。
+        if active_run_count() != 0:
+            cleanup_all_runs()
+
+
+class TestG5Cancellation:
+    """真实 TCP 断连、run 隔离和端到端行为背压。"""
+
+    @staticmethod
+    def _http_client() -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=2.0,
+                read=5.0,
+                write=5.0,
+                pool=2.0,
+            ),
+            limits=httpx.Limits(
+                max_connections=4,
+                max_keepalive_connections=0,
+            ),
+        )
+
+    def test_tcp_disconnect_reaches_underlying_astream(self, tmp_path: Path):
+        """直接退出 httpx 流必须把 CancelledError 传播到底层模型。"""
+        from app_v4.graph.runner import active_run_count
+
+        state = _StreamProbeState()
+        model = _LifecycleProbeModel(
+            {"A": state},
+            {"A": _StreamProbeSpec(1000, 0.1)},
+        )
+
+        with _serve_probe_app(tmp_path, model) as live:
+            async def disconnect_after_answer_token() -> tuple[str, str]:
+                async with self._http_client() as http:
+                    async with http.stream(
+                        "POST",
+                        f"{live.base_url}/api/chat/stream",
+                        json={"message": "你好 stream-probe-A"},
+                    ) as response:
+                        assert response.status_code == 200
+                        assert "text/event-stream" in response.headers["content-type"]
+                        run_id = ""
+                        thread_id = ""
+                        async for event in _iter_sse_events(response):
+                            run_id = run_id or event.get("run_id", "")
+                            thread_id = thread_id or event.get("thread_id", "")
+                            if (
+                                event.get("event") == "token"
+                                and event.get("delta", "").startswith("A:")
+                            ):
+                                assert state.started.is_set()
+                                assert run_id and thread_id
+                                # return 自然退出 response context，关闭未读完的 TCP 流。
+                                return run_id, thread_id
+                raise AssertionError("未收到 A 的可控回答 token")
+
+            async def bounded_disconnect() -> tuple[str, str]:
+                return await asyncio.wait_for(
+                    disconnect_after_answer_token(),
+                    timeout=8,
+                )
+
+            run_id, thread_id = asyncio.run(bounded_disconnect())
+            _wait_until(
+                state.cancelled.is_set,
+                timeout=3,
+                message="TCP 断连后底层 _astream 未收到 CancelledError",
+            )
+            _wait_until(
+                state.finalized.is_set,
+                timeout=3,
+                message="TCP 断连后底层 _astream 未进入 finally",
+            )
+            assert not state.completed.is_set()
+            assert 0 < state.produced < 1000
+            assert state.transitions == ["started", "cancelled", "finally"]
+            _wait_until(
+                lambda: active_run_count() == 0,
+                timeout=3,
+                message="TCP 断连后活跃 run 未归零",
+            )
+            trace = _wait_for_trace(live.deps, run_id, timeout=3)
+            assert trace["run_id"] == run_id
+            assert trace["conversation_id"] == thread_id
+            assert trace["answer_source"] == "cancelled"
+            assert trace["answer"] == ""
+            cancel_rows = [
+                row
+                for row in live.deps.audit_logger.list_logs(limit=100)
+                if row["run_id"] == run_id
+            ]
+            assert len(cancel_rows) == 1, "一次断连只能写一条 cancelled Trace"
+            assert live.deps.long_term_memory.get_stats(thread_id)["total"] == 0
+
+    def test_disconnect_a_does_not_cancel_independent_stream_b(
+        self,
+        tmp_path: Path,
+    ):
+        """同一 app 的 A 断连后，B 必须继续正常完成并写入自己的 Trace。"""
+        from app_v4.graph.runner import active_run_count
+
+        states = {"A": _StreamProbeState(), "B": _StreamProbeState()}
+        model = _LifecycleProbeModel(
+            states,
+            {
+                "A": _StreamProbeSpec(1000, 0.1),
+                "B": _StreamProbeSpec(30, 0.02),
+            },
+        )
+
+        with _serve_probe_app(tmp_path, model) as live:
+            async def consume_a(http: httpx.AsyncClient) -> tuple[str, str]:
+                async with http.stream(
+                    "POST",
+                    f"{live.base_url}/api/chat/stream",
+                    json={"message": "你好 stream-probe-A"},
+                ) as response:
+                    assert response.status_code == 200
+                    run_id = ""
+                    thread_id = ""
+                    async for event in _iter_sse_events(response):
+                        run_id = run_id or event.get("run_id", "")
+                        thread_id = thread_id or event.get("thread_id", "")
+                        if event.get("event") == "token":
+                            assert not event.get("delta", "").startswith("B:")
+                        if (
+                            event.get("event") == "token"
+                            and event.get("delta", "").startswith("A:")
+                        ):
+                            await _wait_thread_event(
+                                states["B"].started,
+                                timeout=3,
+                                message="B 未与 A 独立并发启动",
+                            )
+                            assert not states["B"].completed.is_set()
+                            return run_id, thread_id
+                raise AssertionError("未收到 A 的可控回答 token")
+
+            async def consume_b(
+                http: httpx.AsyncClient,
+            ) -> tuple[str, str, dict[str, Any]]:
+                async with http.stream(
+                    "POST",
+                    f"{live.base_url}/api/chat/stream",
+                    json={"message": "你好 stream-probe-B"},
+                ) as response:
+                    assert response.status_code == 200
+                    run_id = ""
+                    thread_id = ""
+                    done_events: list[dict[str, Any]] = []
+                    async for event in _iter_sse_events(response):
+                        run_id = run_id or event.get("run_id", "")
+                        thread_id = thread_id or event.get("thread_id", "")
+                        if event.get("event") == "token":
+                            assert not event.get("delta", "").startswith("A:")
+                        if event.get("event") == "done":
+                            done_events.append(event)
+                            break
+                    assert len(done_events) == 1
+                    return run_id, thread_id, done_events[0]
+
+            async def drive_both():
+                async with self._http_client() as http:
+                    task_b = asyncio.create_task(consume_b(http))
+                    task_a = asyncio.create_task(consume_a(http))
+                    try:
+                        a_result = await asyncio.wait_for(task_a, timeout=6)
+                        b_result = await asyncio.wait_for(task_b, timeout=8)
+                        await _wait_thread_event(
+                            states["A"].cancelled,
+                            timeout=3,
+                            message="A 断连后未取消底层生成",
+                        )
+                        return a_result, b_result
+                    finally:
+                        for task in (task_a, task_b):
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(
+                            task_a,
+                            task_b,
+                            return_exceptions=True,
+                        )
+
+            async def bounded_both():
+                return await asyncio.wait_for(drive_both(), timeout=12)
+
+            (run_a, thread_a), (run_b, thread_b, done_b) = asyncio.run(
+                bounded_both()
+            )
+            assert run_a and run_b and run_a != run_b
+            assert thread_a and thread_b and thread_a != thread_b
+            assert states["A"].transitions == [
+                "started",
+                "cancelled",
+                "finally",
+            ]
+            assert not states["A"].completed.is_set()
+            assert states["B"].transitions == [
+                "started",
+                "completed",
+                "finally",
+            ]
+            assert not states["B"].cancelled.is_set()
+            assert done_b["run_id"] == run_b
+            assert done_b["thread_id"] == thread_b
+            assert done_b.get("answer")
+            _wait_until(
+                lambda: active_run_count() == 0,
+                timeout=3,
+                message="A/B 流结束后活跃 run 未归零",
+            )
+
+            trace_a = _wait_for_trace(live.deps, run_a, timeout=3)
+            trace_b = _wait_for_trace(live.deps, run_b, timeout=3)
+            assert trace_a["conversation_id"] == thread_a
+            assert trace_a["answer_source"] == "cancelled"
+            assert trace_b["conversation_id"] == thread_b
+            assert trace_b["answer_source"] != "cancelled"
+
+    def test_paused_consumer_applies_behavioral_backpressure(
+        self,
+        tmp_path: Path,
+    ):
+        """暂停生产 async generator 时模型停产，恢复消费后继续推进。"""
+        from app_v4.container import build_dependencies
+        from app_v4.graph.runner import active_run_count, streaming_agent
+        from app_v4.settings import Settings
+
+        state = _StreamProbeState()
+        max_tokens = 80
+        model = _LifecycleProbeModel(
+            {"BP": state},
+            {
+                "BP": _StreamProbeSpec(
+                    token_count=max_tokens,
+                    delay_seconds=0,
+                    chunk_size=64,
+                )
+            },
+        )
+        deps = build_dependencies(
+            Settings(
+                use_fake_model=True,
+                rate_limit_enabled=False,
+                db_path=str(tmp_path / "agent_v4.db"),
+                kill_switch=False,
+            )
+        )
+        deps._model = model
+
+        async def exercise() -> tuple[str, str, int, int, dict[str, Any]]:
+            agen = streaming_agent(
+                "你好 stream-probe-BP",
+                deps=deps,
+            )
+            run_id = ""
+            thread_id = ""
+            try:
+                while True:
+                    event = await asyncio.wait_for(agen.__anext__(), timeout=5)
+                    run_id = run_id or event.get("run_id", "")
+                    thread_id = thread_id or event.get("thread_id", "")
+                    if (
+                        event.get("event") == "token"
+                        and event.get("delta", "").startswith("BP:")
+                    ):
+                        break
+
+                plateau = await _wait_for_production_plateau(
+                    state,
+                    timeout=5,
+                    minimum=1,
+                )
+                assert active_run_count() == 1
+                assert not state.completed.is_set()
+                await asyncio.sleep(0.25)
+                after_pause = state.produced
+                assert after_pause - plateau <= 1
+                assert after_pause < max_tokens
+
+                # 恢复拉取并正常读到 done；先观察模型重新推进，再验证完整结束。
+                resumed = False
+                done: dict[str, Any] | None = None
+                while done is None:
+                    event = await asyncio.wait_for(agen.__anext__(), timeout=5)
+                    resumed = resumed or state.produced > after_pause
+                    if event.get("event") == "done":
+                        done = event
+                assert resumed, "恢复消费后底层模型没有继续推进"
+                return run_id, thread_id, plateau, after_pause, done
+            finally:
+                await agen.aclose()
+                checkpointer = deps._async_checkpointer
+                if checkpointer is not None:
+                    await checkpointer.conn.close()
+                    deps._async_checkpointer = None
+
+        run_id, thread_id, plateau, after_pause, done = asyncio.run(
+            asyncio.wait_for(exercise(), timeout=15)
+        )
+        assert plateau >= 1
+        assert after_pause < max_tokens
+        assert done["run_id"] == run_id
+        assert done["thread_id"] == thread_id
+        assert state.completed.is_set()
+        assert state.finalized.is_set()
+        assert not state.cancelled.is_set()
+        assert state.produced == max_tokens
+        assert state.transitions == ["started", "completed", "finally"]
+        assert active_run_count() == 0
+        trace = _wait_for_trace(deps, run_id, timeout=3)
+        assert trace["conversation_id"] == thread_id
+        assert trace["answer_source"] != "cancelled"
+
+    def test_model_error_closes_stream_without_done_or_leaked_run(
+        self,
+        tmp_path: Path,
+    ):
+        """底层模型异常必须限时结束连接、执行 finally，且不伪造 done。"""
+        from app_v4.graph.runner import active_run_count
+
+        state = _StreamProbeState()
+        fail_after = 3
+        model = _LifecycleProbeModel(
+            {"ERR": state},
+            {
+                "ERR": _StreamProbeSpec(
+                    token_count=100,
+                    delay_seconds=0.01,
+                    fail_after=fail_after,
+                )
+            },
+        )
+
+        with _serve_probe_app(tmp_path, model) as live:
+            async def consume_until_connection_ends():
+                events: list[dict[str, Any]] = []
+                client_error: BaseException | None = None
+                async with self._http_client() as http:
+                    try:
+                        async with http.stream(
+                            "POST",
+                            f"{live.base_url}/api/chat/stream",
+                            json={"message": "你好 stream-probe-ERR"},
+                        ) as response:
+                            assert response.status_code == 200
+                            async for event in _iter_sse_events(response):
+                                events.append(event)
+                    except (
+                        httpx.ReadError,
+                        httpx.RemoteProtocolError,
+                    ) as exc:
+                        # 已开始的 chunked SSE 在服务端异常时通常以不完整响应关闭。
+                        client_error = exc
+                return events, client_error
+
+            async def bounded_error_stream():
+                return await asyncio.wait_for(
+                    consume_until_connection_ends(),
+                    timeout=8,
+                )
+
+            events, client_error = asyncio.run(bounded_error_stream())
+            tagged_tokens = [
+                event
+                for event in events
+                if event.get("event") == "token"
+                and event.get("delta", "").startswith("ERR:")
+            ]
+            assert len(tagged_tokens) == fail_after
+            assert all(event.get("event") != "done" for event in events)
+            # EOF 或明确的 httpx 连接异常都表示流已结束；外层 wait_for 证明未挂起。
+            assert client_error is None or isinstance(
+                client_error,
+                (httpx.ReadError, httpx.RemoteProtocolError),
+            )
+            _wait_until(
+                state.finalized.is_set,
+                timeout=3,
+                message="模型抛错后 _astream 未执行 finally",
+            )
+            assert not state.completed.is_set()
+            assert not state.cancelled.is_set()
+            assert state.transitions == ["started", "finally"]
+            _wait_until(
+                lambda: active_run_count() == 0,
+                timeout=3,
+                message="模型抛错后活跃 run 未归零",
+            )
 
 
 # ---------------------------------------------------------------------------

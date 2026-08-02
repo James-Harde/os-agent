@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -144,8 +145,6 @@ def test_repeated_action_circuit_breaker(client: TestClient, isolated_deps):
         "loop_detected": False,
         "memory_context": {},
         "executed_approvals": [],
-        "stream_tokens": [],
-        "cancelled": False,
         "intent": "",
         "plan": [],
         "answer": "",
@@ -197,8 +196,6 @@ def test_max_iterations_stop(client: TestClient, isolated_deps):
         "loop_detected": False,
         "memory_context": {},
         "executed_approvals": [],
-        "stream_tokens": [],
-        "cancelled": False,
         "intent": "",
         "plan": [],
         "answer": "",
@@ -249,8 +246,6 @@ def test_confirm_tool_exits_react_to_safety_chain(client: TestClient):
         "loop_detected": False,
         "memory_context": {},
         "executed_approvals": [],
-        "stream_tokens": [],
-        "cancelled": False,
         "intent": "",
         "plan": [],
         "answer": "",
@@ -297,8 +292,6 @@ def test_unknown_tool_blocked_in_react(client: TestClient):
         "loop_detected": False,
         "memory_context": {},
         "executed_approvals": [],
-        "stream_tokens": [],
-        "cancelled": False,
         "intent": "",
         "plan": [],
         "answer": "",
@@ -379,8 +372,6 @@ def test_prompt_injection_in_observation_not_obeyed(client: TestClient, isolated
         "loop_detected": False,
         "memory_context": {},
         "executed_approvals": [],
-        "stream_tokens": [],
-        "cancelled": False,
         "intent": "",
         "plan": [],
         "answer": "",
@@ -407,7 +398,7 @@ def test_prompt_injection_in_observation_not_obeyed(client: TestClient, isolated
 
     # 把 scan 结果合并回状态，走真实 readonly_stop 路径
     state.update(scan_result)
-    stop_result = readonly_stop_node(state)
+    stop_result = asyncio.run(readonly_stop_node(state))
     answer = stop_result.get("answer", "")
     tool_calls = stop_result.get("tool_calls", [])
 
@@ -754,8 +745,6 @@ def test_react_message_protocol_tool_call_id_pairing(isolated_deps):
         "loop_detected": False,
         "memory_context": {},
         "executed_approvals": [],
-        "stream_tokens": [],
-        "cancelled": False,
         "intent": "",
         "plan": [],
         "answer": "",
@@ -772,8 +761,14 @@ def test_react_message_protocol_tool_call_id_pairing(isolated_deps):
         # 返回一个合法的 final action JSON，避免节点解析失败。
         return '{"action": "final", "answer": "根据观测：系统正常。"}'
 
-    with patch("app_v4.graph.readonly_react.model_invoke_streaming", side_effect=fake_invoke):
-        readonly_decide_node(state)
+    async def _fake_invoke(model, messages, state):
+        return fake_invoke(model, messages, state)
+
+    async def _run():
+        with patch("app_v4.graph.readonly_react.model_invoke_streaming", side_effect=_fake_invoke):
+            await readonly_decide_node(state)
+
+    asyncio.run(_run())
 
     msgs = captured["messages"]
     assert msgs is not None, "model_invoke_streaming 应被调用"

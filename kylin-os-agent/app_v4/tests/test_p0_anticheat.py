@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+from contextlib import ExitStack
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -107,13 +108,17 @@ class TestTwoAppTwoDb:
             except Exception as exc:
                 errors.append(f"{app_label}: {exc}")
 
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = []
-            for _ in range(4):
-                futures.append(pool.submit(hit, "a", client_a))
-                futures.append(pool.submit(hit, "b", client_b))
-            for f in futures:
-                f.result()
+        # TestClient 进入 context 后，每个 app 使用一个持续的 ASGI portal/
+        # 事件循环，与生产服务一致；这样并发请求会真实竞争各自容器的 asyncio.Lock，
+        # 而不是为每次请求创建互不相干的临时事件循环。
+        with client_a, client_b:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = []
+                for _ in range(4):
+                    futures.append(pool.submit(hit, "a", client_a))
+                    futures.append(pool.submit(hit, "b", client_b))
+                for f in futures:
+                    f.result()
 
         assert not errors, f"并发出错: {errors}"
         assert results["a"] == 4 and results["b"] == 4
@@ -232,13 +237,6 @@ class _DenyPlanModel:
                       "reason": "测试 deny 工具"}],
         }, ensure_ascii=False)
 
-    def invoke_collecting_tokens(self, messages, state):
-        content = self.invoke(messages)
-        state.setdefault("stream_tokens", [])
-        for ch in content:
-            state["stream_tokens"].append(ch)
-        return content
-
 
 class TestDenyToolRawPlanAudit:
     def test_deny_tool_rejected_with_raw_plan_evidence(self, client: TestClient):
@@ -302,9 +300,23 @@ def _build_hitl_client(mutation_enabled: bool = True, fail_adapter: bool = False
     return TestClient(app), deps, rec
 
 
+@pytest.fixture
+def hitl_client_factory():
+    """让同一 HITL app 的多次请求共享一个持续的 ASGI 事件循环。"""
+    with ExitStack() as stack:
+        def build(mutation_enabled: bool = True, fail_adapter: bool = False):
+            client, deps, rec = _build_hitl_client(
+                mutation_enabled=mutation_enabled,
+                fail_adapter=fail_adapter,
+            )
+            return stack.enter_context(client), deps, rec
+
+        yield build
+
+
 class TestHITLApprove:
-    def test_approve_flow_adapter_called_once(self):
-        client, deps, rec = _build_hitl_client(mutation_enabled=True)
+    def test_approve_flow_adapter_called_once(self, hitl_client_factory):
+        client, deps, rec = hitl_client_factory(mutation_enabled=True)
         # 1. 触发 interrupt
         resp = client.post("/api/chat", json={"message": "重启 sshd 服务"})
         assert resp.status_code == 200, resp.text
@@ -340,9 +352,9 @@ class TestHITLApprove:
                 assert f.result().status_code == 200
         assert rec.call_count == 1, f"并发 resume 应仍为 1，实际 {rec.call_count}"
 
-    def test_approval_bound_to_run_thread_tool(self):
+    def test_approval_bound_to_run_thread_tool(self, hitl_client_factory):
         """审批单绑定 run_id + thread_id + tool_name + 参数。"""
-        client, deps, rec = _build_hitl_client(mutation_enabled=True)
+        client, deps, rec = hitl_client_factory(mutation_enabled=True)
         resp = client.post("/api/chat", json={"message": "重启 sshd 服务"})
         data = resp.json()
         approval_id = data["pending_approvals"][0]["approval_id"]
@@ -354,8 +366,8 @@ class TestHITLApprove:
 
 
 class TestHITLReject:
-    def test_reject_flow_adapter_zero(self):
-        client, deps, rec = _build_hitl_client(mutation_enabled=True)
+    def test_reject_flow_adapter_zero(self, hitl_client_factory):
+        client, deps, rec = hitl_client_factory(mutation_enabled=True)
         resp = client.post("/api/chat", json={"message": "重启 sshd 服务"})
         data = resp.json()
         approval_id = data["pending_approvals"][0]["approval_id"]
@@ -370,9 +382,9 @@ class TestHITLReject:
         assert resp.status_code == 200, resp.text
         assert rec.call_count == 0, f"reject 后 adapter 应 0 次，实际 {rec.call_count}"
 
-    def test_rejected_trace_complete(self):
+    def test_rejected_trace_complete(self, hitl_client_factory):
         """reject 后 resume 返回完整 Trace，最终状态可查。"""
-        client, deps, rec = _build_hitl_client(mutation_enabled=True)
+        client, deps, rec = hitl_client_factory(mutation_enabled=True)
         resp = client.post("/api/chat", json={"message": "重启 sshd 服务"})
         data = resp.json()
         approval_id = data["pending_approvals"][0]["approval_id"]
@@ -393,9 +405,12 @@ class TestHITLReject:
 
 
 class TestHITLAdapterFailure:
-    def test_forced_adapter_failure_propagates_error(self):
+    def test_forced_adapter_failure_propagates_error(self, hitl_client_factory):
         """强制 adapter 失败：回答明确失败，不伪装成功。"""
-        client, deps, rec = _build_hitl_client(mutation_enabled=True, fail_adapter=True)
+        client, deps, rec = hitl_client_factory(
+            mutation_enabled=True,
+            fail_adapter=True,
+        )
         resp = client.post("/api/chat", json={"message": "重启 sshd 服务"})
         data = resp.json()
         approval_id = data["pending_approvals"][0]["approval_id"]

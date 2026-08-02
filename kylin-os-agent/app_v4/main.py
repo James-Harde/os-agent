@@ -17,8 +17,10 @@
 标准 MCP 传输由独立 FastMCP Server 提供（Streamable HTTP，路径 /mcp）。
 """
 
+import contextlib
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -32,12 +34,26 @@ from slowapi.middleware import SlowAPIMiddleware
 
 logger = logging.getLogger("app_v4.mcp")
 
-from app_v4.graph.runner import run_agent, streaming_agent
+from app_v4.graph.runner import arun_agent, streaming_agent
 from app_v4.settings import Settings, load_settings
 from app_v4.container import Dependencies, build_dependencies
 
 # 模块级 limiter（SlowAPI 装饰器需要）；实际限流逻辑走容器令牌桶
 _limiter = Limiter(key_func=get_remote_address)
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """断连时显式关闭 body iterator，覆盖取消发生在 ASGI send 的窗口。"""
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                # 清理失败不得覆盖原始网络断连或应用异常。
+                with contextlib.suppress(Exception):
+                    await aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -68,14 +84,35 @@ def create_app(
     Args:
         settings: 配置；None 则从环境变量/.env 加载。        dependencies: 依赖容器；None 则用 settings 构建默认容器。
     """
-    if settings is None:        settings = load_settings()
+    if settings is None:
+        settings = load_settings()
     if dependencies is None:
         dependencies = build_dependencies(settings)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """FastAPI 异步生命周期：管理容器资源的创建与销毁。
+
+        启动时不做额外操作（依赖仍按需懒建）；关闭时调用 ``Dependencies.aclose()``
+        显式关闭 AsyncSqliteSaver 的 aiosqlite 连接（及其 worker 线程），
+        避免事件循环关闭后残留线程触发 ``PytestUnhandledThreadExceptionWarning``。
+
+        真实 Uvicorn 与 TestClient 都经过此生命周期，不再通过替换
+        ``app.router.lifespan_context`` 来掩盖资源泄漏。
+        """
+        try:
+            yield
+        finally:
+            try:
+                await dependencies.aclose()
+            except Exception as exc:  # pragma: no cover - 防御性兜底
+                logger.warning("aclose failed: %s", type(exc).__name__)
 
     app = FastAPI(
         title=settings.app_name,
         description="可运行、可测试、可面试讲解的 Agent 成品。",
         version=settings.app_version,
+        lifespan=lifespan,
     )
 
     # 把容器挂在 app.state，请求处理器通过 request.app.state.deps 访问
@@ -129,12 +166,14 @@ def _register_routes(app: FastAPI) -> None:
             )
 
     # ---- 同步对话 ----
-    def _chat_handler(request: Request, body: ChatRequest) -> dict:
+    async def _chat_handler(request: Request, body: ChatRequest) -> dict:
         try:
             # 显式传入当前 app 的依赖容器，保证图 / 审计 / 记忆 / 审批 / 模型
             # 全部使用与当前 FastAPI app 绑定的同一个 Dependencies（修复 deps 隔离）。
+            # 在 ASGI 事件循环中直接执行异步图，避免多线程 asyncio.run() 各自持有
+            # 独立 AsyncSqliteSaver 导致 SQLite 写冲突（并发请求安全）。
             deps = _get_deps(request)
-            return run_agent(body.message, body.thread_id, body.user_id, deps=deps)
+            return await arun_agent(body.message, body.thread_id, body.user_id, deps=deps)
         except HTTPException:
             raise
         except Exception as exc:
@@ -154,24 +193,19 @@ def _register_routes(app: FastAPI) -> None:
         body: ChatRequest,
         _: None = Depends(rate_limit_dependency),
     ) -> StreamingResponse:
-        from app_v4.graph.runner import streaming_agent, cancel_run
-
         async def event_generator():
-            # 显式传入当前 app 的依赖容器（后台线程内会 set contextvar 传播）
+            # streaming_agent 在完整流生命周期内保持请求容器 ContextVar。
             deps = _get_deps(request)
             agen = streaming_agent(body.message, body.thread_id, body.user_id, deps=deps)
             try:
                 async for event in agen:
-                    # Gate 5 #4：客户端断开时传播 cancellation。
-                    if await request.is_disconnected():
-                        tid = body.thread_id or event.get("thread_id", "")
-                        cancel_run(tid)
-                        break
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             finally:
                 await agen.aclose()
 
-        return StreamingResponse(
+        # Starlette 监听 http.disconnect 并取消发送 task；自定义 response 再保证
+        # 即使取消落在 await send，也会立刻关闭 body iterator。
+        return _ClosingStreamingResponse(
             event_generator(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -249,7 +283,6 @@ def _register_routes(app: FastAPI) -> None:
                 detail="审批单仍在 pending 状态，请先调用 approve 或 reject",
             )
 
-        graph = deps.get_graph()
         config = {"configurable": {"thread_id": record["thread_id"]}}
         decision = record["status"]
         run_id = record["run_id"]
@@ -259,7 +292,10 @@ def _register_routes(app: FastAPI) -> None:
             from app_v4.container import set_deps, reset_deps
             tok = set_deps(deps)
             try:
-                final_state = graph.invoke(resume_command(decision), config)
+                final_state = await deps.ainvoke_locked(
+                    resume_command(decision),
+                    config,
+                )
             finally:
                 reset_deps(tok)
         except Exception as exc:

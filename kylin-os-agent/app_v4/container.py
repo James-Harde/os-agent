@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import contextvars
 import threading
 import time
@@ -85,12 +87,27 @@ class Dependencies:
     _clock: Clock | None = field(default=None, repr=False)
     _graph: Any = field(default=None, repr=False)
     _graph_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _ainvoke_lock: asyncio.Lock | None = field(default=None, repr=False)
     _tool_app_service: Any = field(default=None, repr=False)
     _mcp_invoker: Any = field(default=None, repr=False)
     _rag_store: Any = field(default=None, repr=False)
 
     def reset(self) -> None:
-        """清空延迟组件（用于每个测试后隔离）。"""
+        """清空延迟组件（用于每个测试后隔离）。
+
+        不再把仍打开的资源直接置空：先同步关闭确实持有同步连接的组件
+        （同步 SqliteSaver 的 sqlite3 连接），再清空引用。异步资源
+        （AsyncSqliteSaver 的 aiosqlite 连接）由 ``aclose()`` 负责关闭；
+        本方法会尽力在已有事件循环中触发关闭，但主要生产路径应通过
+        FastAPI lifespan 调用 ``aclose()`` 收口。
+        """
+        if self._checkpointer is not None:
+            # 同步 SqliteSaver 持有 sqlite3 连接，同步关闭。
+            with contextlib.suppress(Exception):
+                self._checkpointer.conn.close()
+        # 异步 checkpointer 需异步关闭；尽力而为，生产路径统一走 aclose()。
+        if self._async_checkpointer is not None:
+            self._close_async_checkpointer_best_effort()
         self._checkpointer = None
         self._async_checkpointer = None
         self._audit_logger = None
@@ -101,9 +118,99 @@ class Dependencies:
         self._limiter = None
         self._clock = None
         self._graph = None
+        self._ainvoke_lock = None
         self._tool_app_service = None
         self._mcp_invoker = None
         self._rag_store = None
+
+    def _close_async_checkpointer_best_effort(self) -> None:
+        """尽力同步触发异步 checkpointer 关闭（不保证完成）。
+
+        若当前线程正运行事件循环，则把 aiosqlite 连接关闭调度到该循环；
+        若无事件循环，放弃关闭——生产路径应由 lifespan 的 ``aclose()`` 收口。
+        """
+        conn = getattr(self._async_checkpointer, "conn", None)
+        if conn is None:
+            self._async_checkpointer = None
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None or loop.is_closed():
+            return
+        # 调度关闭；不 await，reset() 本身是同步的。关闭失败时吞异常，
+        # 避免 reset 路径因资源清理问题掩盖真实的测试失败。
+        async def _close() -> None:
+            with contextlib.suppress(Exception):
+                await conn.close()
+
+        try:
+            if hasattr(loop, "create_task"):
+                loop.create_task(_close())
+        except RuntimeError:
+            pass
+
+    async def aclose(self) -> None:
+        """幂等异步关闭：关闭容器持有的所有异步资源。
+
+        生产路径通过 FastAPI lifespan 调用本方法，确保 AsyncSqliteSaver 的
+        aiosqlite 连接（及其 worker 线程）在事件循环关闭前被显式关闭，
+        避免 ``PytestUnhandledThreadExceptionWarning``。
+
+        关闭对象：
+          - AsyncSqliteSaver 的 aiosqlite 连接
+          - 同步 SqliteSaver 的 sqlite3 连接
+          - 其他确实由容器持有且提供 ``close``/``aclose`` 的异步资源
+
+        重复调用不得报错：每次关闭前检查引用是否为 None，已关闭的资源直接跳过。
+        """
+        # --- AsyncSqliteSaver / aiosqlite ---
+        if self._async_checkpointer is not None:
+            conn = getattr(self._async_checkpointer, "conn", None)
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    await conn.close()
+            self._async_checkpointer = None
+        # --- 同步 SqliteSaver / sqlite3 ---
+        if self._checkpointer is not None:
+            with contextlib.suppress(Exception):
+                self._checkpointer.conn.close()
+            self._checkpointer = None
+        # --- 模型（ChatOpenAI 等）---
+        if self._model is not None:
+            aclose = getattr(self._model, "aclose", None)
+            if callable(aclose):
+                with contextlib.suppress(Exception):
+                    await aclose()
+            self._model = None
+        # --- MCP invoker（若持有长连接）---
+        if self._mcp_invoker is not None:
+            aclose = getattr(self._mcp_invoker, "aclose", None)
+            if callable(aclose):
+                with contextlib.suppress(Exception):
+                    await aclose()
+            self._mcp_invoker = None
+        # --- RAG store（Milvus 等，若持有连接）---
+        if self._rag_store is not None:
+            for name in ("aclose", "close"):
+                fn = getattr(self._rag_store, name, None)
+                if callable(fn):
+                    with contextlib.suppress(Exception):
+                        await fn() if name == "aclose" else fn()
+                    break
+            self._rag_store = None
+        # 其余组件（audit/approval/memory/cache/limiter/clock/graph）不持有
+        # 需要显式关闭的持久连接，直接清空引用。
+        self._audit_logger = None
+        self._approval_store = None
+        self._long_term_memory = None
+        self._cache = None
+        self._limiter = None
+        self._clock = None
+        self._graph = None
+        self._ainvoke_lock = None
+        self._tool_app_service = None
 
     # ------------------------------------------------------------------
     # 延迟构建的组件（每个组件在首次访问时按当前 settings 创建）
@@ -242,6 +349,19 @@ class Dependencies:
         from app_v4.graph.builder import _build_graph_with
         cp = await self.get_async_checkpointer()
         return _build_graph_with(cp)
+
+    async def ainvoke_locked(self, initial, config):
+        """在容器级 asyncio.Lock 下执行 ainvoke，序列化对共享 SQLite checkpoint 的写访问。
+
+        多个并发请求共享同一个 AsyncSqliteSaver（同一事件循环内），其写操作
+        若同时发生会触发 SQLITE_BUSY。通过锁将各次图执行串行化，避免 SQLite
+        写冲突（代价：并发请求的图执行变为串行，但每个请求仍走异步模型）。
+        """
+        if self._ainvoke_lock is None:
+            self._ainvoke_lock = asyncio.Lock()
+        async with self._ainvoke_lock:
+            graph = await self.get_async_graph()
+            return await graph.ainvoke(initial, config)
 
 
 # ---------------------------------------------------------------------------

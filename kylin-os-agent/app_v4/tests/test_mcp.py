@@ -10,8 +10,12 @@
 """
 
 import asyncio
+import os
 import socket
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -81,6 +85,35 @@ def _run_native_mcp_test(port: int, test_fn):
                 pass
 
     return asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# 独立 Server 启动边界
+# ---------------------------------------------------------------------------
+def test_native_server_import_does_not_require_mcp_client_url():
+    """独立 MCP Server 不应依赖 Web Agent 的 MCP Client URL。
+
+    子进程刻意使用真实模型模式并清空 MCP_SERVER_URL，防止 pytest 的
+    全局 fake 配置掩盖模块导入副作用。
+    """
+    env = os.environ.copy()
+    env["APP_V4_USE_FAKE_MODEL"] = "false"
+    env["MCP_SERVER_URL"] = ""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import app_v4.mcp.native_server; print('NATIVE_SERVER_IMPORT_OK')",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "NATIVE_SERVER_IMPORT_OK" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +218,23 @@ def test_build_dependencies_defaults_to_local_invoker_when_unconfigured():
         f"未配置 mcp_server_url 时应为 LocalToolInvoker，"
         f"实际 {type(deps.mcp_invoker).__name__}"
     )
+
+
+def test_build_dependencies_real_model_requires_mcp_url():
+    """Web Agent 使用真实模型时必须配置 MCP Client URL，启动时 fail-fast。"""
+    from app_v4.settings import Settings
+    from app_v4.container import build_dependencies
+
+    settings = Settings(
+        use_fake_model=False,
+        rate_limit_enabled=False,
+        openai_compatible_base_url="https://example.invalid/v1",
+        openai_compatible_api_key="test-only",
+        openai_compatible_model="test-only",
+        mcp_server_url="",
+    )
+    with pytest.raises(RuntimeError, match="MCP_SERVER_URL"):
+        build_dependencies(settings)
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +412,67 @@ def test_native_mcp_known_tool_validation_failure_is_error():
     _run_native_mcp_test(18035, check)
 
 
+def test_native_mcp_unavailable_result_is_error(tmp_path):
+    """工具不可用属于执行失败，MCP 必须设置 isError=True。
+
+    这是平台无关测试：注入返回 unavailable 的应用服务，不依赖当前系统
+    是否提供 journalctl 等命令。
+    """
+    from app_v4.audit.logger import AuditLogger
+    from app_v4.mcp.native_server import create_mcp_server
+
+    class UnavailableToolService:
+        def execute_auto(self, tool_name, arguments):
+            return {
+                "status": "unavailable",
+                "error": "backend unavailable",
+                "source": "test_backend",
+            }
+
+    port = 18036
+    _wait_port_free(port, timeout=5)
+    audit_logger = AuditLogger(db_path=tmp_path / "audit.db")
+    mcp = create_mcp_server(
+        app_service=UnavailableToolService(),
+        audit_logger=audit_logger,
+        host="127.0.0.1",
+        port=port,
+    )
+
+    async def run():
+        server, serve_task = _start_mcp_server_with(mcp, port)
+        try:
+            ready = await _wait_server_ready(server, timeout=5.0)
+            assert ready, f"MCP Server 未在端口 {port} 就绪"
+            async with streamablehttp_client(f"http://127.0.0.1:{port}/mcp") as (
+                read,
+                write,
+                _,
+            ):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool("disk_usage", {"path": "."})
+                    text = "".join(
+                        c.text for c in result.content if hasattr(c, "text")
+                    )
+                    data = __import__("json").loads(text)
+                    assert result.isError is True
+                    assert data["status"] == "unavailable"
+        finally:
+            server.should_exit = True
+            try:
+                await asyncio.wait_for(serve_task, timeout=3)
+            except Exception:
+                pass
+
+    asyncio.run(run())
+    logs = audit_logger.list_logs(limit=10)
+    assert len(logs) == 1
+    assert logs[0]["guard_decision"] == "allow", (
+        "后端不可用是运行故障，不应伪装成安全策略阻断"
+    )
+
+
 # ---------------------------------------------------------------------------
 # MCP 断连 fail-closed
 # ---------------------------------------------------------------------------
@@ -375,13 +486,11 @@ def test_mcp_invoker_fail_closed_when_server_unreachable():
     async def run():
         return await invoker.invoke("disk_usage", {"path": "."})
 
-    # 必须抛出异常（连接失败），而不是返回本地工具结果
-    with pytest.raises(Exception) as exc_info:
-        asyncio.run(run())
-
-    # 确认不是本地降级（错误信息应涉及连接失败，而非本地工具执行）
-    err_msg = str(exc_info.value).lower()
-    assert "used_percent" not in err_msg, "fail-closed 不应返回本地工具结果"
+    result = asyncio.run(run())
+    assert result["status"] == "unavailable"
+    assert result["source"] == "mcp_transport"
+    assert result["tool_name"] == "disk_usage"
+    assert "used_percent" not in result, "fail-closed 不应返回本地工具结果"
 
 
 # ---------------------------------------------------------------------------

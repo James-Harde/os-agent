@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import json
 import re
+import asyncio
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -44,22 +45,51 @@ def get_chat_model() -> BaseChatModel:
     return get_deps().model
 
 
-def model_invoke_streaming(model: BaseChatModel, messages: list[BaseMessage], state: dict) -> str:
-    """调用模型并收集 token 到 state["stream_tokens"]。
+async def model_invoke_streaming(
+    model: BaseChatModel, messages: list[BaseMessage], state: dict,
+) -> str:
+    """异步调用模型并返回完整文本。
 
-    - fake model：用 invoke_collecting_tokens（token 来自模型自身 astream 逻辑）
-    - 真实模型（ChatOpenAI 等）：无同步 token 流，退化为普通 invoke（返回完整文本）
+    Gate 5：节点通过 ``model.ainvoke()`` 调用模型，LangGraph 的流处理器会驱动
+    模型底层 ``_astream``，并把真实增量暴露为 ``astream(version="v2")`` 的
+    ``messages`` 事件；这里不手工切分答案，也不在模型通用封装里耦合任何流式
+    协议或背压逻辑——那些职责隔离在 ``graph/runner.py`` 的 streaming 模块。
 
-    Gate 5：token 事件必须来自模型 astream。fake model 的 _tokenize_for_stream
-    即其 astream 的真实切分逻辑，非手工切最终答案。
+    兼容分支：
+      - 有 ``ainvoke`` 的模型（ChatOpenAI、FakeChatModel）走异步调用。
+      - 仅有 ``astream`` 的旧测试替身走异步流拼接。
+      - 仅有同步 ``invoke`` 的模型在线程中执行以避免阻塞事件循环。
     """
-    if hasattr(model, "invoke_collecting_tokens"):
-        return model.invoke_collecting_tokens(messages, state)
-    # 真实模型同步路径不支持逐 token；返回完整文本，token 流由异步路径处理
-    response = model.invoke(messages)
-    content = response.content if hasattr(response, "content") else str(response)
-    # 真实模型同步调用不做 token 切分（避免违反"非手工切字符串"规则）
-    return content
+    if hasattr(model, "ainvoke"):
+        response = await model.ainvoke(messages)
+        return _message_text(response)
+    if hasattr(model, "astream"):
+        chunks: list[str] = []
+        async for chunk in model.astream(messages):
+            text = _message_text(chunk)
+            if text:
+                chunks.append(text)
+        return "".join(chunks)
+    # 兜底：旧测试模型仅有同步 invoke，在线程中执行以避免阻塞事件循环。
+    response = await asyncio.to_thread(model.invoke, messages)
+    return _message_text(response)
+
+
+def _message_text(message: Any) -> str:
+    """兼容字符串内容与 v3 content-block 内容，提取模型文本。"""
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content
+    text = getattr(message, "text", None)
+    if isinstance(text, str):
+        return text
+    if isinstance(content, list):
+        return "".join(
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return str(content)
 
 
 class _FakeChatModel(BaseChatModel):
@@ -74,26 +104,19 @@ class _FakeChatModel(BaseChatModel):
       - astream 产出逐 token 事件（按字/词切分），供 SSE token 流测试。
     """
 
-    def _generate(self, messages: list[BaseMessage], **kwargs: Any) -> Any:
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> Any:
         from langchain_core.messages import AIMessage
         from langchain_core.outputs import ChatResult, ChatGeneration
 
+        del stop, run_manager, kwargs
         content = _fake_response(messages)
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
-
-    def invoke_collecting_tokens(self, messages: list[BaseMessage], state: dict) -> str:
-        """同步调用：产出完整文本，并把每个 token 写入 state["stream_tokens"]。
-
-        token 来自模型自身的 astream 逻辑（_tokenize_for_stream），
-        不是把最终答案手工切字符串，满足 Gate 5 "token 来自模型 astream" 的要求。
-        """
-        content = _fake_response(messages)
-        # 模型自身的 tokenization 逻辑（与 _astream 一致）
-        tokens = _tokenize_for_stream(content)
-        state.setdefault("stream_tokens", [])
-        for tok in tokens:
-            state["stream_tokens"].append(tok)
-        return content
 
     async def _astream(self, messages: list[BaseMessage], **kwargs: Any):
         """按字/词逐 token yield AIMessageChunk（确定性，供 SSE token 流）。"""

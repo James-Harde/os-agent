@@ -37,27 +37,6 @@ def _latest_user_message(state: AgentState) -> str:
     return ""
 
 
-async def _acall_model_collecting_tokens(
-    model, messages: list, state: AgentState,
-) -> str:
-    """调用模型 astream，把每个 token 追加到 state["stream_tokens"]，返回完整文本。
-
-    Gate 5：token 事件必须来自模型 astream，不能把完整答案手工切字符串。
-    同步路径（run_agent）通过 asyncio.run 调用；流式路径（streaming_agent）直接 await。
-    """
-    chunks: list[str] = []
-    state.setdefault("stream_tokens", [])
-    async for chunk in model.astream(messages):
-        if isinstance(chunk, str):
-            text = chunk
-        else:
-            text = getattr(chunk, "content", "") or ""
-        if text:
-            chunks.append(text)
-            state["stream_tokens"].append(text)
-    return "".join(chunks)
-
-
 def _extract_json(content: str) -> dict[str, Any]:
     try:
         return json.loads(content)
@@ -80,7 +59,7 @@ _READONLY_KEYWORDS = ("磁盘", "disk", "进程", "process", "端口", "port", "
 _KNOWLEDGE_KEYWORDS = ("知识库", "知识", "faq", "FAQ", "如何", "怎么", "怎样", "什么是", "原理")
 
 
-def route_node(state: AgentState) -> dict[str, Any]:
+async def route_node(state: AgentState) -> dict[str, Any]:
     """场景路由节点 — 模型分类 + 编排层校验。
 
     模型返回 consult / knowledge / readonly_diagnosis / mutation 候选。
@@ -114,7 +93,7 @@ def route_node(state: AgentState) -> dict[str, Any]:
         route_messages.append(HumanMessage(content=f"上一轮用户输入：{prev_user_msg}"))
     route_messages.append(HumanMessage(content=f"当前用户输入：{user_input}"))
 
-    full_response = model_invoke_streaming(model, route_messages, state)
+    full_response = await model_invoke_streaming(model, route_messages, state)
 
     parsed = _extract_json(full_response)
     raw_route = parsed.get("route", "consult")
@@ -147,7 +126,7 @@ def route_node(state: AgentState) -> dict[str, Any]:
     return {"route": route, "intent": intent}
 
 
-def direct_answer_node(state: AgentState) -> dict[str, Any]:
+async def direct_answer_node(state: AgentState) -> dict[str, Any]:
     """普通咨询直接回答 — 不调工具，模型直接生成回答。"""
     t0 = time.monotonic()
     model = get_chat_model()
@@ -160,7 +139,7 @@ def direct_answer_node(state: AgentState) -> dict[str, Any]:
     )
 
     from app_v4.model.chat_model import model_invoke_streaming
-    full_response = model_invoke_streaming(
+    full_response = await model_invoke_streaming(
         model,
         [SystemMessage(content=system_prompt), HumanMessage(content=user_input)],
         state,
@@ -180,7 +159,7 @@ def direct_answer_node(state: AgentState) -> dict[str, Any]:
 _CONTEXT_COMPRESS_THRESHOLD = 12
 
 
-def _compress_context(messages: list[Any], model, state: AgentState) -> list[Any]:
+async def _compress_context(messages: list[Any], model, state: AgentState) -> list[Any]:
     """压缩过长对话：将早期消息摘要化，保留近期消息和关键 ToolMessage。
 
     Gate 6 #6：长对话达阈值后生成摘要，保留近期消息和关键 ToolMessage；
@@ -216,9 +195,9 @@ def _compress_context(messages: list[Any], model, state: AgentState) -> list[Any
             "将以下运维对话压缩为 3-5 句中文摘要，保留关键结论、工具调用结果和待办。"
             "只输出摘要文本。\n\n" + "\n".join(parts)
         )
-        # 用模型的同步调用生成摘要（fake model 返回确定性文本）
+        # 用模型调用生成摘要（fake model 返回确定性文本）
         from app_v4.model.chat_model import model_invoke_streaming
-        summary = model_invoke_streaming(
+        summary = await model_invoke_streaming(
             model,
             [SystemMessage(content=summary_prompt)],
             state,
@@ -374,7 +353,7 @@ def preflight_node(state: AgentState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 节点 2: LLM 规划（sync — 模型内部 astream 产出 token 写入 state）
 # ---------------------------------------------------------------------------
-def plan_node(state: AgentState) -> dict[str, Any]:
+async def plan_node(state: AgentState) -> dict[str, Any]:
     t0 = time.monotonic()
     model = get_chat_model()
     user_input = _latest_user_message(state)
@@ -466,12 +445,12 @@ def plan_node(state: AgentState) -> dict[str, Any]:
     # §4.2 #4：规划模型必须看到经过裁剪的真实 thread 上下文，
     # 而不是只看到本轮字符串。这样"那 5432 呢"才能利用历史解析意图。
     # Gate 6 #6：长对话压缩（超阈值后摘要化早期消息，保留近期+关键 ToolMessage）
-    messages = _compress_context(state.get("messages", []), model, state)
+    messages = await _compress_context(state.get("messages", []), model, state)
     # 取最近 N 条历史消息（HumanMessage）+ 当前请求，避免上下文无限增长。
     recent_history = _recent_messages(messages, last_n=8)
     # Gate 5：token 来自模型自身 astream 逻辑（非手工切最终答案字符串）
     from app_v4.model.chat_model import model_invoke_streaming
-    full_response = model_invoke_streaming(
+    full_response = await model_invoke_streaming(
         model,
         [SystemMessage(content=system_prompt)]
         + recent_history
@@ -907,7 +886,7 @@ def approval_interrupt_node(state: AgentState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 节点 5: LLM 汇总（sync — 模型内部 astream 产出 token 写入 state）
 # ---------------------------------------------------------------------------
-def summarize_node(state: AgentState) -> dict[str, Any]:
+async def summarize_node(state: AgentState) -> dict[str, Any]:
     t0 = time.monotonic()
     model = get_chat_model()
     guard = SafetyGuard()
@@ -937,7 +916,7 @@ def summarize_node(state: AgentState) -> dict[str, Any]:
 
     # Gate 5：token 来自模型自身 astream 逻辑（非手工切最终答案字符串）
     from app_v4.model.chat_model import model_invoke_streaming
-    full_response = model_invoke_streaming(
+    full_response = await model_invoke_streaming(
         model,
         [SystemMessage(content=(
             "你是安全运维 Agent 的总结模块。基于工具结果给出中文结论。"

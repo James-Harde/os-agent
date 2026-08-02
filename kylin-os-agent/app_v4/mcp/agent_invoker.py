@@ -45,7 +45,11 @@ async def _streamable_call(
             for content in result.content:
                 if hasattr(content, "text"):
                     text += content.text
-            return json.loads(text) if text else {}
+            payload = json.loads(text) if text else {}
+            if result.isError:
+                payload.setdefault("status", "error")
+                payload.setdefault("error", "MCP tool call failed")
+            return payload
 
 
 async def _streamable_list_tools(base_url: str) -> list[dict[str, Any]]:
@@ -87,7 +91,8 @@ class MCPToolInvoker:
     生产用法：由 build_dependencies 在 settings.mcp_server_url 非空时注入，
     使 Agent 工具调用走 MCP transport。
 
-    MCP 不可达时抛出异常（fail-closed），禁止静默回退本地工具。
+    MCP 不可达时返回结构化 ``unavailable``（fail-closed），禁止静默
+    回退本地工具。
     """
 
     def __init__(self, base_url: str = "http://127.0.0.1:8001/mcp") -> None:
@@ -96,9 +101,24 @@ class MCPToolInvoker:
     async def invoke(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """经 streamable_http transport 调用工具，返回解析后的结果 dict。
 
-        传输失败时抛出异常（fail-closed），不捕获为本地降级。
+        传输或协议失败时返回结构化 ``unavailable``（fail-closed），
+        不捕获为本地降级。
         """
-        return await _streamable_call(self._base_url, tool_name, arguments)
+        try:
+            return await _streamable_call(self._base_url, tool_name, arguments)
+        except Exception as exc:
+            logger.warning(
+                "MCP transport unavailable: tool=%s error_type=%s",
+                tool_name,
+                type(exc).__name__,
+            )
+            return {
+                "status": "unavailable",
+                "error": "MCP transport unavailable",
+                "error_type": type(exc).__name__,
+                "source": "mcp_transport",
+                "tool_name": tool_name,
+            }
 
     async def list_tools(self) -> list[dict[str, Any]]:
         """经 streamable_http transport 列出工具。"""

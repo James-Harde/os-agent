@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any
 
 
-# 默认路径（向后兼容）；测试通过 db_path 参数注入临时库
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "agent_v4.db"
+# 默认路径与 Settings.resolved_db_path() 保持一致；测试通过 db_path 注入临时库。
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "agent_v4.db"
 
 
 class AuditLogger:

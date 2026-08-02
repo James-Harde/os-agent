@@ -1,115 +1,148 @@
 # app_v4 Latest Handoff
 
-Updated: 2026-07-28 (MCP repair verified → MOSTLY COMPLETE)
+Updated: 2026-08-02
+Status: public-v2 SSE cancellation repair INCOMPLETE; lifecycle deferred
 
 ## Resume
 
-Read:
+Read only:
 
 1. `D:\klin-agent\app4-需求清单.md`
 2. `app_v4/docs/WORK-STATE.md`
 3. this file
-4. `git status --short` and the focused diff
+4. `git status --short`
+5. focused diff for `runner.py` and the streaming/cancellation tests
 
-Do not repeat a full-repository audit.
+Do not repeat a full-repository audit. Do not enter RAG, MCP, lifecycle, or any
+other roadmap area in this window.
 
-## This Window Summary
+## Current Window
 
-MCP 已从 PARTIAL 修到可验证 PASS。基于 2026-07-28 独立审计的 7 个阻塞项全部
-闭环：
+The latest window implemented a v2 streaming attempt in `runner.py`, fixed the
+undefined cleanup call, and reduced the focused SSE behavior failures from
+three to two. It did not meet the goal and did not update the durable handoff
+before its context filled.
 
-1. **生产 fail-fast**：`use_fake_model=false` + 空 `mcp_server_url` 时
-   `build_dependencies` 抛 `RuntimeError`，不再静默 `LocalToolInvoker`。
-2. **结构化 metadata**：`tools/list` 返回非空 `ToolAnnotations` + `meta`
-   （permission/risk_level），风险不再拼进 description。
-3. **isError 语义**：已知工具校验/策略/注入失败返回
-   `CallToolResult(isError=True, ...)`。
-4. **注入阻断写审计**：阻断前先 `record()`，0 执行 +1 审计。
-5. **统一执行**：auto 工具经 `ToolApplicationService.execute_auto()`，
-   `native_server.py` 不再直接 `tool_obj.invoke()`。
-6. **唯一 Trace ID**：每次调用生成 UUID `mcp:<tool>:<uuid>`。
-7. **最小权限**：外部 MCP 仅注册 auto 只读工具；confirm/mutation 保留在
-   LangGraph policy → HITL → 服务端审批链。
+The window ran no destructive Git command. The current tree remains dirty with
+accumulated work from earlier accepted chains; do not revert unrelated changes.
 
-Verified results (project `.venv`, Python 3.13.9):
+Seven untracked root probes were created:
 
-```text
-default offline suite:             153 passed, 13 deselected, 0 failed
-real Milvus integration:           5 passed
-real embedding smoke:              2 passed
-real Embedding + Milvus E2E:       1 passed (isolated collection, cleaned up)
-real DeepSeek consult:             PASS
-real DeepSeek read-only ReAct:     PASS (full 3-iteration loop)
-MCP 官方 Client lifecycle:         1 passed (initialize + tools/list + tools/call)
-MCPToolInvoker 生产路径:           1 passed (streamable_http → 真实 disk_usage)
-MCP E2E (/api/chat → MCP):         1 passed
-MCP 结构化 metadata + 共享审计:     1 passed (新增)
-MCP mutation 不暴露 + isError:     2 passed (新增)
-MCP 注入阻断 + 审计:               1 passed (新增)
-MCP 唯一 invocation ID:            1 passed (新增)
-MCP 断连 fail-closed:              1 passed
-pip check:                         pass
-git diff --check:                  exit 0
-```
+- `probe_v2.py`
+- `probe_cancel.py`
+- `probe_cancel2.py`
+- `probe_cancel3.py`
+- `probe_stream.py`
+- `probe_real.py`
+- `probe_design.py`
 
-## Scope Decisions (still in force)
+They are temporary deletion candidates, not production evidence. Do not delete
+them without user approval.
 
-- Use public MCP SDK 1.28.1 APIs. Do not reintroduce hand-written JSON-RPC,
-  duplicate transports, private `_tool_manager` access, or string-parsed risk
-  metadata.
-- `LocalToolInvoker` may remain only as an explicitly injected test/development
-  adapter (`use_fake_model=true`).
-- External MCP exposes only read-only `auto` tools. Mutation tools remain on the
-  LangGraph policy -> HITL -> server-verified approval path. Never accept a
-  client-supplied `approval_status` as authorization.
-- All MCP outcomes pass through one injectable execution/audit boundary
-  (`ToolApplicationService` + shared `AuditLogger`) and receive a unique
-  invocation ID.
+## Verified Mechanism Facts
 
-## Acceptance Items
+1. Public `graph.astream(..., version="v2",
+   stream_mode=["messages", "updates"])` emits the expected public v2 events
+   on the real compiled graph.
+2. The current bounded token channel passes the existing behavioral
+   backpressure test and model-error test.
+3. Real TCP disconnect cancels the HTTP/driver path but still does not reach
+   the injected model's `_astream` as `CancelledError`.
+4. Stream B remains independently valid, but disconnecting stream A still does
+   not cancel model A.
+5. Making `_BackpressureHandler` inherit the private
+   `_StreamingCallbackHandler` marker did not close either cancellation gap.
+   That hypothesis is disproven and must not be retried.
+6. `cleanup_all_runs()` no longer references undefined
+   `_streaming_run_state`.
 
-| Criterion | Status |
-|---|---|
-| 官方 Client initialize + tools/list + tools/call | ✅ 1 passed |
-| /api/chat → MCP → 真实 disk_usage E2E | ✅ 1 passed |
-| 旧手写 MCP 路径已删除 | ✅ |
-| MCP 断连 fail-closed | ✅ 1 passed |
-| 生产默认 fail-fast（空 MCP_SERVER_URL） | ✅ 代码实现 + 注入测试验证 |
-| 结构化 risk metadata / annotations | ✅ 1 passed (new) |
-| known-tool `isError` 语义 | ✅ 1 passed (new) |
-| MCP 注入阻断写审计（0 执行 +1 审计） | ✅ 1 passed (new) |
-| MCP auto 工具统一执行服务 | ✅ execute_auto 实现 + 测试 |
-| 相同调用独立 Trace ID | ✅ 1 passed (new) |
-| MCP 审计与 Agent 共享 AuditLogger | ✅ 1 passed (new) |
-| mutation 工具不暴露 | ✅ 1 passed (new) |
-| 默认离线回归 | ✅ 153 passed, 13 deselected, 0 failed |
-| git diff --check 通过 | ✅ exit 0 |
+## Current Production State
 
-## Files Changed This Window
+- `streaming_agent()` now attempts public-v2 `astream(messages, updates)` with
+  a bounded token queue and a driver task.
+- The handler imports
+  `langchain_core.tracers._streaming._StreamingCallbackHandler`, a private API.
+  The current attempt therefore violates its own production constraint.
+- TCP disconnect does not cancel the underlying model.
+- Stream A cancellation does not reach model A in the A/B isolation case.
+- Behavioral backpressure and model-error handling pass the focused tests.
+- AsyncSqliteSaver shutdown still leaks an aiosqlite worker-thread exception.
+- Lifecycle remains a separate, deferred repair after SSE cancellation.
 
-```
-app_v4/tools/application.py       + execute_auto 统一 auto 工具执行
-app_v4/mcp/native_server.py       重写：最小权限、annotations+meta、isError、唯一 ID、共享审计
-app_v4/container.py               + 生产 fail-fast（空 MCP_SERVER_URL）
-app_v4/tests/test_mcp.py          + 6 个新测试（metadata/isError/注入/唯一 ID/最小权限）
-app_v4/tests/test_mcp_e2e.py      + 1 个新 E2E（结构化 metadata + 共享审计）
-.env.example                      + MCP_SERVER_URL
-docs 同步更新（WORK-STATE/HANDOFF/MATRIX）
-```
+Historical `11 passed` results belong to an earlier working-tree snapshot and
+are not evidence for the current tree.
 
-## First Commands (regression guard)
+## Fresh Baseline
+
+Command:
 
 ```powershell
 cd D:\klin-agent\kylin-os-agent
-.venv\Scripts\python -m pytest app_v4/tests/test_mcp.py -q -p no:cacheprovider -o addopts=""
-.venv\Scripts\python -m pytest app_v4/tests/test_mcp_e2e.py -m real_mcp_e2e -q -p no:cacheprovider -s
-.venv\Scripts\python -m pytest app_v4/tests -q -p no:cacheprovider
-.venv\Scripts\python -m pip check
-git diff --check
+.venv\Scripts\python -m pytest app_v4/tests/test_stream.py app_v4/tests/test_acceptance_blackbox.py::TestG5SSETokenStream app_v4/tests/test_acceptance_blackbox.py::TestG5Cancellation app_v4/tests/test_async_dependency_isolation.py -q -p no:cacheprovider -o addopts=""
 ```
+
+Result:
+
+```text
+14 passed, 2 failed, 1 warning in 28.13s
+```
+
+Failures:
+
+1. `test_tcp_disconnect_reaches_underlying_astream`
+2. `test_disconnect_a_does_not_cancel_independent_stream_b`
+
+No full-suite or `pip check` acceptance was run in this repair window.
+`git diff --check` exited 0.
+
+Deferred lifecycle command independently produced:
+
+```text
+2 passed, 1 failed, 1 warning in 8.18s
+FAIL: TestTwoAppTwoDb::test_two_apps_independent_threads
+      (PytestUnhandledThreadExceptionWarning: Event loop is closed)
+```
+
+## Architecture Constraints
+
+- Prefer documented, mature LangGraph/LangChain/FastAPI/Starlette mechanisms.
+  Do not hand-write a replacement for framework orchestration or cancellation.
+- Production must use public stable APIs. Private modules, underscore-prefixed
+  protocols, monkey patches, polling, and test-tuned timing are not acceptable.
+- If a new mainstream dependency is genuinely required, report its package,
+  version, purpose, official source, and alternatives, then wait for user
+  approval before installation.
+- Production streaming must retain public v2 `astream(messages, updates)` or a
+  better documented public framework path justified by evidence.
+- A bounded async channel is accepted only where behavioral tests prove it.
+- Do not use private LangGraph APIs, v3 as the final path, unbounded queues,
+  polling, daemon workers, or manual final-answer tokenization.
+- Cancellation must stop and await graph/model tasks, emit no `done`, write
+  exactly one cancel Trace, clear the run registry, and isolate stream B.
+- `Dependencies.aclose()` must be awaited and idempotent. Lifespan owns
+  shutdown; `reset()` must not discard live resources or fire-and-forget.
+- Do not weaken or delete tests to manufacture PASS.
+- Do not use `git checkout/restore/reset/clean/stash`, and do not commit,
+  push, delete files, or modify secrets without user approval.
+
+## First Action Next Window
+
+Read the installed package versions and relevant public implementation/docs,
+then identify which task actually owns model generation and which public
+FastAPI/LangGraph cancellation boundary can cancel and await it. Remove the
+private marker experiment before claiming a solution.
 
 ## Next Three Actions
 
-1. Verify and repair real server-side SSE cancellation/backpressure.
-2. Complete RAG evaluation/Badcase evidence.
-3. Final interview transfer and user teach-back.
+1. Replace the private-marker experiment with a documented public mechanism.
+2. Pass exactly the two failing cancellation tests while preserving all 14
+   currently passing focused behaviors; run `git diff --check`.
+3. Update this handoff and `WORK-STATE.md` with commands and exact results, then
+   stop. Do not begin lifecycle repair in the same window.
+
+Keep at most five TODO items. After each accepted behavior, after about 20 tool
+calls or 45 minutes, and before context reaches 70%, checkpoint exact facts in
+the two durable documents. Test one hypothesis once; if evidence contradicts
+it, record and discard it instead of retrying it. If the same blocker repeats
+three times, run the smallest relevant test, update both documents, and end
+honestly as BLOCKED/INCOMPLETE so a fresh context can resume immediately.
