@@ -50,18 +50,22 @@ async def model_invoke_streaming(
 ) -> str:
     """异步调用模型并返回完整文本。
 
-    Gate 5：节点通过 ``model.ainvoke()`` 调用模型，LangGraph 的流处理器会驱动
-    模型底层 ``_astream``，并把真实增量暴露为 ``astream(version="v2")`` 的
-    ``messages`` 事件；这里不手工切分答案，也不在模型通用封装里耦合任何流式
-    协议或背压逻辑——那些职责隔离在 ``graph/runner.py`` 的 streaming 模块。
+    Gate 5：节点通过 ``model.ainvoke()`` 调用模型。这里显式传入 ``stream=True``，
+    使模型走 ``_astream`` 路径并把每个 token 通过 ``on_llm_new_token`` 回调送出
+    （由 ``graph/runner.py`` 的 ``_BackpressureHandler`` 收集进有界通道），
+    同时 ``ainvoke`` 仍会把所有 chunk 聚合为完整回答返回。不使用任何私有
+    LangGraph/LangChain 标记协议——``stream=True`` 是 ``ainvoke`` 的公开参数，
+    对不注册 token 回调的调用方行为等价于非流式（仅内部走 ``_astream`` 聚合）。
+    这里不手工切分答案，也不在模型通用封装里耦合背压逻辑——那些职责隔离在
+    ``graph/runner.py`` 的 streaming 模块。
 
     兼容分支：
-      - 有 ``ainvoke`` 的模型（ChatOpenAI、FakeChatModel）走异步调用。
+      - 有 ``ainvoke`` 的模型（ChatOpenAI、FakeChatModel）走异步调用（流式聚合）。
       - 仅有 ``astream`` 的旧测试替身走异步流拼接。
       - 仅有同步 ``invoke`` 的模型在线程中执行以避免阻塞事件循环。
     """
     if hasattr(model, "ainvoke"):
-        response = await model.ainvoke(messages)
+        response = await model.ainvoke(messages, stream=True)
         return _message_text(response)
     if hasattr(model, "astream"):
         chunks: list[str] = []

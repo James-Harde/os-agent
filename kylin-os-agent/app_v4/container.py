@@ -93,21 +93,23 @@ class Dependencies:
     _rag_store: Any = field(default=None, repr=False)
 
     def reset(self) -> None:
-        """清空延迟组件（用于每个测试后隔离）。
+        """清空延迟组件引用（用于每个测试后隔离）。
 
-        不再把仍打开的资源直接置空：先同步关闭确实持有同步连接的组件
-        （同步 SqliteSaver 的 sqlite3 连接），再清空引用。异步资源
-        （AsyncSqliteSaver 的 aiosqlite 连接）由 ``aclose()`` 负责关闭；
-        本方法会尽力在已有事件循环中触发关闭，但主要生产路径应通过
-        FastAPI lifespan 调用 ``aclose()`` 收口。
+        语义：
+          - 同步 SqliteSaver 持有 ``sqlite3`` 连接，这里同步关闭后清空引用。
+          - 异步 ``AsyncSqliteSaver`` 的 ``aiosqlite`` 连接属于异步资源，同步
+            ``reset`` 既无法保证 await 完成，也不能 fire-and-forget 调度后立即
+            丢引用（会丢出仍在线的 worker 线程）。因此这里仅清空引用，把关闭
+            责任完全交给 ``aclose()``——生产路径通过 FastAPI lifespan 调用它，
+            测试路径通过 ``with TestClient(app)`` 触发 lifespan，或在容器生命周期
+            末尾显式 ``await deps.aclose()``。
+          - 禁止守护线程、轮询、sleep，也不在同步方法里吞掉异步资源错误。
         """
         if self._checkpointer is not None:
             # 同步 SqliteSaver 持有 sqlite3 连接，同步关闭。
             with contextlib.suppress(Exception):
                 self._checkpointer.conn.close()
-        # 异步 checkpointer 需异步关闭；尽力而为，生产路径统一走 aclose()。
-        if self._async_checkpointer is not None:
-            self._close_async_checkpointer_best_effort()
+        # 异步 checkpointer 只清空引用；关闭由 aclose() 在异步上下文里完成。
         self._checkpointer = None
         self._async_checkpointer = None
         self._audit_logger = None
@@ -122,34 +124,6 @@ class Dependencies:
         self._tool_app_service = None
         self._mcp_invoker = None
         self._rag_store = None
-
-    def _close_async_checkpointer_best_effort(self) -> None:
-        """尽力同步触发异步 checkpointer 关闭（不保证完成）。
-
-        若当前线程正运行事件循环，则把 aiosqlite 连接关闭调度到该循环；
-        若无事件循环，放弃关闭——生产路径应由 lifespan 的 ``aclose()`` 收口。
-        """
-        conn = getattr(self._async_checkpointer, "conn", None)
-        if conn is None:
-            self._async_checkpointer = None
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop is None or loop.is_closed():
-            return
-        # 调度关闭；不 await，reset() 本身是同步的。关闭失败时吞异常，
-        # 避免 reset 路径因资源清理问题掩盖真实的测试失败。
-        async def _close() -> None:
-            with contextlib.suppress(Exception):
-                await conn.close()
-
-        try:
-            if hasattr(loop, "create_task"):
-                loop.create_task(_close())
-        except RuntimeError:
-            pass
 
     async def aclose(self) -> None:
         """幂等异步关闭：关闭容器持有的所有异步资源。

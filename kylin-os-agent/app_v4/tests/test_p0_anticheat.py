@@ -68,29 +68,35 @@ class TestTwoAppTwoDb:
 
     def test_sync_request_isolates_db(self):
         (client_a, deps_a, _), (client_b, deps_b, _) = self._two_apps()
-        # 向 B 发一个会产生审计的同步请求
-        resp = client_b.post("/api/chat", json={"message": "帮我分析磁盘"})
-        assert resp.status_code == 200, resp.text
+        # 两个 app 都进入 TestClient context，使 FastAPI lifespan 在退出时
+        # 调用 aclose() 关闭 AsyncSqliteSaver 的 aiosqlite 连接与 worker 线程，
+        # 避免残留线程泄漏到后续测试触发 PytestUnhandledThreadExceptionWarning。
+        with client_a, client_b:
+            # 向 B 发一个会产生审计的同步请求
+            resp = client_b.post("/api/chat", json={"message": "帮我分析磁盘"})
+            assert resp.status_code == 200, resp.text
 
-        # B 的 DB 应有审计记录
-        b_logs = deps_b.audit_logger.list_logs(limit=10)
-        assert len(b_logs) >= 1, "B 应至少 1 条审计"
-        # A 的 DB 必须为 0
-        a_logs = deps_a.audit_logger.list_logs(limit=10)
-        assert len(a_logs) == 0, f"A 的 DB 应保持 0 条，实际 {len(a_logs)}"
+            # B 的 DB 应有审计记录
+            b_logs = deps_b.audit_logger.list_logs(limit=10)
+            assert len(b_logs) >= 1, "B 应至少 1 条审计"
+            # A 的 DB 必须为 0
+            a_logs = deps_a.audit_logger.list_logs(limit=10)
+            assert len(a_logs) == 0, f"A 的 DB 应保持 0 条，实际 {len(a_logs)}"
 
     def test_stream_request_isolates_db(self):
         (client_a, deps_a, _), (client_b, deps_b, _) = self._two_apps()
-        # 向 B 发流式请求
-        with client_b.stream("POST", "/api/chat/stream", json={"message": "帮我分析磁盘"}) as resp:
-            assert resp.status_code == 200
-            body = resp.read()
-        assert body, "流式响应应有内容"
+        # 同上：进入 TestClient context 让 lifespan 收口 aclose()。
+        with client_a, client_b:
+            # 向 B 发流式请求
+            with client_b.stream("POST", "/api/chat/stream", json={"message": "帮我分析磁盘"}) as resp:
+                assert resp.status_code == 200
+                body = resp.read()
+            assert body, "流式响应应有内容"
 
-        b_logs = deps_b.audit_logger.list_logs(limit=10)
-        assert len(b_logs) >= 1, "B 的 DB 流式后应至少 1 条审计"
-        a_logs = deps_a.audit_logger.list_logs(limit=10)
-        assert len(a_logs) == 0, f"A 的 DB 应保持 0 条，实际 {len(a_logs)}"
+            b_logs = deps_b.audit_logger.list_logs(limit=10)
+            assert len(b_logs) >= 1, "B 的 DB 流式后应至少 1 条审计"
+            a_logs = deps_a.audit_logger.list_logs(limit=10)
+            assert len(a_logs) == 0, f"A 的 DB 应保持 0 条，实际 {len(a_logs)}"
 
     def test_two_apps_independent_threads(self):
         """两个 app 并发请求，各自写各自 DB，互不串。"""

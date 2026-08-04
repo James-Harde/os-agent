@@ -19,7 +19,6 @@ from typing import Any, AsyncGenerator
 
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import HumanMessage
-from langchain_core.tracers._streaming import _StreamingCallbackHandler
 from langgraph.errors import GraphInterrupt
 
 from app_v4.graph.builder import get_graph, get_async_graph
@@ -306,13 +305,16 @@ async def streaming_agent(
     Gate 6：user_id 用于记忆隔离。
 
     生产路径（唯一，公共稳定 v2）：
-      - 图通过 ``graph.astream(..., version="v2", stream_mode=["messages","updates"])``
+      - 图通过 ``graph.astream(..., version="v2", stream_mode=["updates"])``
         在后台 task 驱动；模型 token 经公共回调流入有界异步通道。
+        不用 ``"messages"`` 模式——token 全部由回调收集，省去 ``get_waiter``，
+        使 ``PregelRunner.atick`` 走单任务快速路径，节点（含模型）内联运行在
+        驱动任务里。不使用私有 LangGraph API、v3 最终路径、无界队列、轮询、
+        daemon 线程。
       - 有界通道是唯一缓冲：暂停消费时 ``queue.put`` 阻塞，把
         ``CancelledError``/背压沿 ``on_llm_new_token`` → 模型 ``_astream`` 传播。
-        不使用私有 LangGraph API、v3 最终路径、无界队列、轮询、daemon 线程。
       - HTTP 断连关闭本 async generator，随即取消并等待后台图 task；
-        ``CancelledError`` 沿 ``astream`` → 模型 ``_astream`` 传播，
+        模型内联在驱动任务里，``CancelledError`` 直接到达模型 ``_astream``，
         模型 ``finally`` 运行。仅写一条 cancel Trace，run registry 归零，
         A 取消不影响 B。
 
@@ -360,13 +362,21 @@ async def streaming_agent(
     driver_err: list[BaseException] = []
 
     async def _drive_graph() -> None:
-        """后台驱动图；token 经回调 → token_queue。"""
+        """后台驱动图；token 经回调 → token_queue。
+
+        使用 ``stream_mode=["updates"]``（不含 ``"messages"``）：token 全部由
+        ``_BackpressureHandler.on_llm_new_token`` 回调经有界通道收集，
+        不依赖 ``"messages"`` 事件。去掉 ``"messages"`` 后 LangGraph 不会创建
+        ``get_waiter``，``PregelRunner.atick`` 走单任务快速路径——节点（含模型）
+        内联运行在驱动任务里。这是取消传播的关键：取消驱动任务时
+        ``CancelledError`` 直接到达内联的模型 ``_astream``，而非滞留在独立的节点任务里。
+        """
         try:
             async for _ in graph.astream(
                 initial,
                 config,
                 version="v2",
-                stream_mode=["messages", "updates"],
+                stream_mode=["updates"],
             ):
                 pass
         except asyncio.CancelledError:
@@ -465,32 +475,24 @@ async def streaming_agent(
         unregister_run(run_id)
 
 
-class _BackpressureHandler(AsyncCallbackHandler, _StreamingCallbackHandler):
+class _BackpressureHandler(AsyncCallbackHandler):
     """把模型 token 写入有界通道的公共回调处理器。
 
-    同时继承 ``_StreamingCallbackHandler`` 标记协议，使 LangGraph 的
-    ``do_stream=True``：节点（含模型）内联运行在 astream 消费者任务中，
-    而非提交到单独的节点任务。这是取消传播的关键——当消费者（驱动任务）
-    被取消时，内联的模型 ``_astream`` 会直接收到 ``CancelledError``，
-    而不是滞留在独立的节点任务里。
+    只要 ``graph.astream`` 使用 ``stream_mode=["updates"]``（不含 ``"messages"``），
+    LangGraph 就不会创建 ``get_waiter``，``PregelRunner.atick`` 走单任务快速路径，
+    节点（含模型）内联运行在驱动任务里。此时对每个 ``on_llm_new_token`` 调用，
+    框架直接 ``await`` 本回调；模型 ``_astream`` 在
+    ``await run_manager.on_llm_new_token(...)`` 处被阻塞，因此当通道满时
+    ``await queue.put(token)`` 把背压传回模型生成循环。
 
-    LangGraph 在 ``graph.astream(version="v2", stream_mode=["messages", ...])``
-    期间，对每个 ``on_llm_new_token`` 调用，框架通过 ``ahandle_event`` 直接
-    ``await`` 本回调（与 ``run_inline`` 无关，协程成员恒被 await）。
-    模型 ``_astream`` 在 ``await run_manager.on_llm_new_token(...)`` 处被阻塞，
-    因此当通道满时 ``await queue.put(token)`` 把背压传回模型生成循环。
+    取消传播依赖同一前提：驱动任务被取消时，``CancelledError`` 直接到达内联的
+    模型 ``_astream``，而不是滞留在独立的节点任务里。不使用任何私有 LangGraph
+    标记协议或 ``do_stream`` 开关——内联执行由 ``stream_mode`` 公开参数决定。
     """
 
     def __init__(self, queue: "asyncio.Queue[str]") -> None:
         super().__init__()
         self.queue = queue
-
-    # _StreamingCallbackHandler 标记协议要求（仅用于触发 do_stream=True）。
-    def tap_output_aiter(self, run_id: Any, output: Any) -> Any:
-        return output
-
-    def tap_output_iter(self, run_id: Any, output: Any) -> Any:
-        return output
 
     async def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
         await self.queue.put(token)

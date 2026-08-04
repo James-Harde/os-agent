@@ -114,6 +114,58 @@ def test_dependencies_reset_clears_async_lock(tmp_path: Path) -> None:
     assert deps._ainvoke_lock is None
 
 
+def test_aclose_is_idempotent_and_nulls_refs(tmp_path: Path) -> None:
+    """aclose() 必须幂等：重复调用不报错，且关闭后 checkpointer 引用清空。"""
+
+    deps, _ = _build_counted_deps(tmp_path / "aclose-idem.db")
+
+    async def _drive() -> None:
+        # 触发异步 checkpointer 懒建（打开 aiosqlite 连接 + worker 线程）
+        cp = await deps.get_async_checkpointer()
+        assert deps._async_checkpointer is cp
+        # 第一次关闭
+        await deps.aclose()
+        assert deps._async_checkpointer is None
+        assert deps._checkpointer is None
+        # 第二次关闭（幂等）：已 None，不得报错
+        await deps.aclose()
+        assert deps._async_checkpointer is None
+
+    asyncio.run(_drive())
+
+
+def test_two_apps_aclose_are_independent(tmp_path: Path) -> None:
+    """两个 app 各自持有独立的 AsyncSqliteSaver；关闭 A 不影响 B 的连接。"""
+
+    deps_a, _ = _build_counted_deps(tmp_path / "indep-a.db")
+    deps_b, _ = _build_counted_deps(tmp_path / "indep-b.db")
+
+    async def _drive() -> object:
+        cp_a = await deps_a.get_async_checkpointer()
+        cp_b = await deps_b.get_async_checkpointer()
+        # 两个容器持有不同实例（资源独立）
+        assert cp_a is not cp_b
+        assert deps_a._async_checkpointer is cp_a
+        assert deps_b._async_checkpointer is cp_b
+        # 关闭 A
+        await deps_a.aclose()
+        assert deps_a._async_checkpointer is None
+        # B 的引用与实例保持完整
+        assert deps_b._async_checkpointer is cp_b
+        return cp_b
+
+    cp_b = asyncio.run(_drive())
+
+    # 退出后 B 仍可独立关闭
+    async def _close_b() -> None:
+        await deps_b.aclose()
+        assert deps_b._async_checkpointer is None
+
+    asyncio.run(_close_b())
+    # 防止 lint 未使用告警（cp_b 仅用于身份断言）
+    assert cp_b is not None
+
+
 def test_two_apps_two_databases_remain_isolated_under_concurrency(
     tmp_path: Path,
 ) -> None:
