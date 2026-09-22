@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     milvus_collection: str = "rag_knowledge"
     milvus_timeout: float = 10.0
 
+    # ---- 知识库文档导入 ----
+    # 受控上传目录（不信任客户端文件名/路径）；默认 app_v4/data/uploads。
+    knowledge_upload_dir: str = ""
+    # 单文件大小上限（默认 10 MB），总存储上限（默认 100 MB）。
+    knowledge_single_max_bytes: int = 10 * 1024 * 1024
+    knowledge_total_max_bytes: int = 100 * 1024 * 1024
+
     # ---- 持久化 ----
     # 默认数据库路径；测试注入临时路径覆盖
     db_path: str = ""
@@ -116,6 +123,16 @@ class Settings(BaseSettings):
         if self.db_path:
             return Path(self.db_path)
         return PROJECT_ROOT / "app_v4" / "data" / "agent_v4.db"
+
+    def resolved_knowledge_upload_dir(self) -> Path:
+        """返回受控上传目录（未配置则用默认位置）。"""
+        if self.knowledge_upload_dir:
+            return Path(self.knowledge_upload_dir)
+        return PROJECT_ROOT / "app_v4" / "data" / "uploads"
+
+    def resolved_knowledge_db_path(self) -> Path:
+        """知识库元数据清单 DB 路径。"""
+        return PROJECT_ROOT / "app_v4" / "data" / "knowledge.db"
 
     def model_post_init(self, __context: object) -> None:
         """启动校验：非 fake 模型时必须配置 base URL / key / model。

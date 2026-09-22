@@ -165,7 +165,8 @@ def test_mcp_tool_invoker_hits_native_server():
             assert ready, f"MCP Server 未在端口 {port} 就绪"
             invoker = MCPToolInvoker(base_url=f"http://127.0.0.1:{port}/mcp")
             result = await invoker.invoke("disk_usage", {"path": "."})
-            return result
+            catalog = await invoker.list_tools()
+            return result, catalog
         finally:
             server.should_exit = True
             try:
@@ -173,13 +174,16 @@ def test_mcp_tool_invoker_hits_native_server():
             except Exception:
                 pass
 
-    data = asyncio.run(run())
+    data, catalog = asyncio.run(run())
 
     assert "_mcp_duration_ms" in data, (
         f"经 MCP transport 的结果应含 _mcp_duration_ms 标记: {list(data.keys())}"
     )
     assert data.get("status") == "success"
     assert "used_percent" in data, "原生 server 应返回真实磁盘数据"
+    disk = next(tool for tool in catalog if tool["name"] == "disk_usage")
+    assert disk["permission"] == "auto"
+    assert "path" in disk["inputSchema"]["properties"]
 
 
 # ---------------------------------------------------------------------------

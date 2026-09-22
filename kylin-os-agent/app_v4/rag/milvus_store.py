@@ -3,7 +3,7 @@
 纵向链路（对齐 app4-需求清单 §5）：
   LangChain Document
   → RecursiveCharacterTextSplitter
-  → 真实 Embedding（独立配置，langchain-openai 兼容，符合 Embeddings 接口）
+  →  Embedding（独立配置，langchain-openai 兼容，符合 Embeddings 接口）
   → 官方 langchain-milvus ``Milvus`` 向量存储
   → Milvus Standalone（Docker Compose，v2.6+）
   → Milvus dense retrieval（IP）+ 内置 BM25 sparse retrieval（BM25BuiltInFunction）
@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from typing import Any, Iterable, Optional
@@ -211,8 +212,11 @@ class MilvusRAGStore:
                 f"集合 {self._collection_name} 未注册 BM25 built-in function"
             )
 
-        # 4) 元数据字段
-        for required in ("source", "document_id", "chunk_id"):
+        # 4) 元数据字段（含文档导入扩展：content_hash / original_filename / page）
+        for required in (
+            "source", "document_id", "chunk_id",
+            "content_hash", "original_filename", "page",
+        ):
             if required not in fields:
                 raise IncompatibleCollectionError(
                     f"集合 {self._collection_name} 缺少元数据字段 '{required}'"
@@ -223,7 +227,12 @@ class MilvusRAGStore:
 
     @staticmethod
     def _build_metadata_schema() -> dict[str, Any]:
-        """声明元数据字段 schema（source / document_id / chunk_id）。
+        """声明元数据字段 schema（source / document_id / chunk_id + 文档导入扩展）。
+
+        文档导入扩展字段（知识库导入闭环）：
+          - content_hash : 切片内容 SHA-256（前 16 位），用于精确删除与独立验证。
+          - original_filename : 用户原始文件名（仅元数据，不参与路径/鉴权）。
+          - page : 来源页码（PDF/Word 解析时有值；纯文本为空字符串）。
 
         注意：pymilvus 3.0 的 ``schema.add_field`` 要求 dtype 为 ``DataType`` 枚举，
         不接受字符串；max_length 通过 kwargs 传入。
@@ -232,6 +241,9 @@ class MilvusRAGStore:
             "source": {"dtype": DataType.VARCHAR, "max_length": 1024},
             "document_id": {"dtype": DataType.VARCHAR, "max_length": 1024},
             "chunk_id": {"dtype": DataType.VARCHAR, "max_length": 1024},
+            "content_hash": {"dtype": DataType.VARCHAR, "max_length": 128},
+            "original_filename": {"dtype": DataType.VARCHAR, "max_length": 1024},
+            "page": {"dtype": DataType.VARCHAR, "max_length": 64},
         }
 
     @staticmethod
@@ -259,7 +271,13 @@ class MilvusRAGStore:
     # 语料写入（幂等：稳定 id + upsert）
     # ------------------------------------------------------------------
     def _prepare_rows(self, documents: Iterable[Document]) -> tuple[list[str], list[Document]]:
-        """切片文档为 (ids, documents) 行。稳定 chunk_id 保证幂等。"""
+        """切片文档为 (ids, documents) 行。稳定 chunk_id 保证幂等。
+
+        每个 chunk 的 metadata 扩展文档导入字段：
+          - content_hash : 切片文本 SHA-256（前 16 位），便于精确删除 / 独立验证。
+          - original_filename : 用户原始文件名（从 doc.metadata 透传，缺省为空）。
+          - page : 来源页码（PDF/Word 解析时 LangChain loader 注入，纯文本为空）。
+        """
         rows_docs: list[Document] = []
         rows_ids: list[str] = []
         for doc in documents:
@@ -271,12 +289,18 @@ class MilvusRAGStore:
                     continue
                 chunk_id = f"{doc_id}-c{j}"
                 rows_ids.append(chunk_id)
+                base_meta = chunk.metadata or {}
                 rows_docs.append(Document(
                     page_content=text,
                     metadata={
-                        "source": chunk.metadata.get("source", doc.metadata.get("source", doc_id)),
+                        "source": base_meta.get("source", doc.metadata.get("source", doc_id)),
                         "document_id": doc_id,
                         "chunk_id": chunk_id,
+                        "content_hash": _content_hash(text),
+                        "original_filename": base_meta.get(
+                            "original_filename", doc.metadata.get("original_filename", ""),
+                        ),
+                        "page": base_meta.get("page", doc.metadata.get("page", "")),
                     },
                 ))
         return rows_ids, rows_docs
@@ -359,6 +383,28 @@ class MilvusRAGStore:
                 # 查询失败时保守处理：假设都不存在，让写入去重由调用方兜底。
                 logger.warning("查询已存在 id 失败，跳过该批去重: %s", expr[:120])
         return found
+
+    def delete_by_document_id(self, document_id: str) -> int:
+        """按 document_id 精确删除该文档的全部 chunk，不清空整个集合。
+
+        使用 Milvus 的 ``filter`` 删除（pymilvus 3.0 ``client.delete(filter=...)``），
+        仅命中 ``document_id == <id>`` 的行。删除后 flush 使生效。
+
+        返回删除的 chunk 数（服务端 ``delete_count``）；集合不存在时返回 0。
+        """
+        store = self._ensure_store()
+        if not store.client.has_collection(self._collection_name):
+            return 0
+        expr = f'document_id == "{document_id}"'
+        try:
+            res = store.client.delete(self._collection_name, filter=expr)
+            deleted = int(res.get("delete_count", 0))
+        except Exception:
+            logger.warning("按 document_id 删除失败: %s", document_id)
+            raise
+        self._flush()
+        logger.info("Milvus 按 document_id 删除：%s（%d 个 chunk）", document_id, deleted)
+        return deleted
 
     def _flush(self) -> None:
         """将当前集合的写入缓冲持久化（Milvus 标准写入语义）。"""
@@ -446,8 +492,17 @@ class _RRFReranker(RRFRanker):
         return FunctionType.RERANK
 
 
+def _content_hash(text: str) -> str:
+    """切片文本的内容哈希（SHA-256 前 16 位），用于精确删除与独立验证。"""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def _to_result(doc: Document, score: float) -> dict[str, Any]:
-    """将 (Document, score) 转为统一结果结构（含可核验 citation）。"""
+    """将 (Document, score) 转为统一结果结构（含可核验 citation）。
+
+    文档导入扩展字段（original_filename / page）随结果透传，便于前端在引用中
+    显示文件名与页码；``rag_search`` 等旧消费方忽略多余键，不受影响。
+    """
     meta = doc.metadata
     doc_id = meta.get("document_id", "")
     chunk_id = meta.get("chunk_id", "")
@@ -458,4 +513,6 @@ def _to_result(doc: Document, score: float) -> dict[str, Any]:
         "document_id": doc_id,
         "chunk_id": chunk_id,
         "citation": f"[{doc_id}]",
+        "original_filename": meta.get("original_filename", ""),
+        "page": meta.get("page", ""),
     }

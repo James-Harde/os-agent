@@ -232,6 +232,10 @@ def _fake_response(messages: list[BaseMessage]) -> str:
     if "只读诊断模块" in first_content:
         return _fake_react_decide(messages, last)
 
+    # --- 普通咨询直接回答 ---
+    if "普通咨询问题" in first_content:
+        return _fake_direct_answer(messages)
+
     # 判断是规划请求还是总结请求：system prompt 或最后一条含 allowed_tools
     is_planning = "allowed_tools" in last or "plan" in str(last).lower()[:200]
 
@@ -315,6 +319,31 @@ def _fake_response(messages: list[BaseMessage]) -> str:
     return json.dumps({"intent": "general_help", "plan": []}, ensure_ascii=False)
 
 
+def _fake_direct_answer(messages: list[BaseMessage]) -> str:
+    """为开发/测试模式提供可读的普通咨询回答，不伪装成工具总结。"""
+    human_messages = _human_contents(messages)
+    user_input = human_messages[-1] if human_messages else ""
+    lowered = user_input.lower()
+
+    if "磁盘" in user_input and any(k in user_input for k in ("原因", "为什么", "有哪些")):
+        return (
+            "磁盘空间不足的常见原因包括：日志长期未轮转、临时文件或缓存堆积、"
+            "数据库与备份持续增长、容器镜像和构建产物残留，以及删除文件后进程仍占用句柄。"
+            "如果要检查当前机器，可以再发送“分析当前磁盘使用情况”。"
+        )
+    if "load average" in lowered or "负载" in user_input:
+        return (
+            "Load Average 表示一段时间内处于可运行状态或不可中断等待状态的任务数量。"
+            "判断是否偏高要结合 CPU 核数，并继续观察 CPU、I/O 和进程状态。"
+        )
+    if "你好" in user_input or "介绍" in user_input:
+        return (
+            "你好，我可以直接回答运维常识，也可以按需查询知识库、执行只读诊断，"
+            "或把有副作用的操作送入人工审批流程。"
+        )
+    return "这是普通咨询路径：模型会直接回答，不调用系统工具。"
+
+
 def _fake_route(messages: list[BaseMessage]) -> str:
     """场景路由的确定性分类（scripted model for testing）。
 
@@ -367,6 +396,17 @@ def _fake_route(messages: list[BaseMessage]) -> str:
         return json.dumps({
             "route": "knowledge",
             "reason": "检测到知识查询意图",
+        }, ensure_ascii=False)
+
+    # 原理、原因、区别等一般解释不需要读取当前机器，走普通咨询。
+    explanation_kws = ("原因", "为什么", "为何", "有哪些", "介绍", "解释", "区别")
+    diagnosis_kws = ("分析", "查看", "查询", "检查", "当前", "本机", "这台", "占用")
+    if any(kw in user_input for kw in explanation_kws) and not any(
+        kw in user_input for kw in diagnosis_kws
+    ):
+        return json.dumps({
+            "route": "consult",
+            "reason": "一般原理或原因咨询，不需要读取当前系统状态",
         }, ensure_ascii=False)
 
     # readonly_diagnosis: 只读诊断

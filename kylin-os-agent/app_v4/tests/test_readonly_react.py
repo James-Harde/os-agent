@@ -547,6 +547,20 @@ def test_route_classification_consult(client: TestClient):
     assert data.get("route") == "consult"
 
 
+def test_general_disk_explanation_uses_direct_consult_without_tools(client: TestClient):
+    """一般原因解释不应误触发当前机器的只读诊断。"""
+    resp = client.post(
+        "/api/chat",
+        json={"message": "磁盘空间经常不足有哪些常见原因？"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("route") == "consult"
+    assert data.get("answer_source") == "direct_answer"
+    assert data.get("tool_calls") == []
+    assert "日志" in data.get("answer", "")
+
+
 def test_route_classification_mutation(client: TestClient):
     """'重启 sshd 服务' 应路由到 mutation。"""
     resp = client.post("/api/chat", json={"message": "重启 sshd 服务"})

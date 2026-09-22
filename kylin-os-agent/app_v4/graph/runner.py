@@ -351,6 +351,11 @@ async def streaming_agent(
     handler = _BackpressureHandler(token_queue)
     config["callbacks"] = [handler]
 
+    # 实时节点进度通道：承载 preflight/plan/execute/summarize/deny 节点事件，
+    # 使前端在图运行期间就能看到可见进度（而非等图跑完后从 trace_steps 重建）。
+    # 节点事件每轮仅数个，有界 64 足以容纳，不会成为背压瓶颈。
+    node_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=_NODE_QUEUE_CAPACITY)
+
     # 首次构建 saver 必须串行，避免两个并发流同时执行 SQLite PRAGMA
     # 初始化并争锁；初始化完成后释放锁，图执行仍可并发。
     if eff_deps._ainvoke_lock is None:
@@ -362,7 +367,7 @@ async def streaming_agent(
     driver_err: list[BaseException] = []
 
     async def _drive_graph() -> None:
-        """后台驱动图；token 经回调 → token_queue。
+        """后台驱动图；token 经回调 → token_queue，节点事件 → node_queue。
 
         使用 ``stream_mode=["updates"]``（不含 ``"messages"``）：token 全部由
         ``_BackpressureHandler.on_llm_new_token`` 回调经有界通道收集，
@@ -370,15 +375,29 @@ async def streaming_agent(
         ``get_waiter``，``PregelRunner.atick`` 走单任务快速路径——节点（含模型）
         内联运行在驱动任务里。这是取消传播的关键：取消驱动任务时
         ``CancelledError`` 直接到达内联的模型 ``_astream``，而非滞留在独立的节点任务里。
+
+        ``astream`` 每个节点完成时产出 ``{"type":"updates","data":{node: partial}}``。
+        我们把它翻译为节点事件放入 node_queue，使前端实时获得进度。
+        ``__interrupt__`` / ``route`` / ``assess_plan`` / ``readonly_*`` 等节点不
+        产生面向用户的事件，_node_to_event 对它们返回 None，自然跳过。
         """
         try:
-            async for _ in graph.astream(
+            async for chunk in graph.astream(
                 initial,
                 config,
                 version="v2",
                 stream_mode=["updates"],
             ):
-                pass
+                # 防御：astream 偶尔产出非 updates 块时跳过。
+                if not isinstance(chunk, dict) or chunk.get("type") != "updates":
+                    continue
+                data = chunk.get("data") or {}
+                if not isinstance(data, dict):
+                    continue
+                for node_name, partial in data.items():
+                    ev = _node_to_event(node_name, partial, run_id, thread_id)
+                    if ev is not None:
+                        await node_queue.put(ev)
         except asyncio.CancelledError:
             raise
         except BaseException as e:
@@ -389,21 +408,35 @@ async def streaming_agent(
 
     driver = asyncio.create_task(_drive_graph())
     graph_completed = False
-    pending_get: asyncio.Task[str] | None = None
     done_wait: asyncio.Task[bool] = asyncio.create_task(done_event.wait())
+    pending_token_get: asyncio.Task[str] | None = None
+    pending_node_get: asyncio.Task[dict[str, Any]] | None = None
+
+    def _cancel_pending_gets() -> None:
+        """取消所有未完成的队列 get，避免孤儿 task。"""
+        for t in (pending_token_get, pending_node_get):
+            if t is not None and not t.done():
+                t.cancel()
 
     try:
-        while not done_event.is_set():
-            pending_get = asyncio.create_task(token_queue.get())
+        # 合并消费 token 流与节点进度流。两者在同一个 wait 中竞争：谁先到谁先产出，
+        # 保证 token 不丢、节点进度不滞后于 done_event。
+        while (
+            not done_event.is_set()
+            or not token_queue.empty()
+            or not node_queue.empty()
+        ):
+            if pending_token_get is None:
+                pending_token_get = asyncio.create_task(token_queue.get())
+            if pending_node_get is None:
+                pending_node_get = asyncio.create_task(node_queue.get())
             completed, _ = await asyncio.wait(
-                {pending_get, done_wait},
+                {pending_token_get, pending_node_get, done_wait},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if pending_get in completed:
-                # 取得一个 token；若 done_event 也恰好在同一轮置位，先产出该 token
-                # 再退出，避免丢 token。
-                tok = await pending_get
-                pending_get = None
+            if pending_token_get in completed:
+                tok = await pending_token_get
+                pending_token_get = None
                 if ttft is None:
                     ttft = round((time.monotonic() - t_start) * 1000, 2)
                 yield {
@@ -414,27 +447,11 @@ async def streaming_agent(
                     "index": token_count,
                 }
                 token_count += 1
-                if done_event.is_set():
-                    break
-            else:
-                # done_event 先置位：取消未完成的 get 并退出。
-                pending_get.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pending_get
-                break
-        # 排空驱动任务结束后可能残留在通道内的 token。
-        while not token_queue.empty():
-            tok = token_queue.get_nowait()
-            if ttft is None:
-                ttft = round((time.monotonic() - t_start) * 1000, 2)
-            yield {
-                "event": "token",
-                "run_id": run_id,
-                "thread_id": thread_id,
-                "delta": tok,
-                "index": token_count,
-            }
-            token_count += 1
+            if pending_node_get in completed:
+                ev = await pending_node_get
+                pending_node_get = None
+                yield ev
+            # 若 done_event 先置位，循环条件会排空两通道内残留事件后退出。
         graph_completed = True
         if driver_err:
             raise driver_err[0]
@@ -459,15 +476,14 @@ async def streaming_agent(
         raise
     finally:
         # 关闭流必须取消并等待图 task，使 CancelledError 传播到模型；无孤儿 task。
-        if pending_get is not None and not pending_get.done():
-            pending_get.cancel()
+        _cancel_pending_gets()
         if not done_wait.done():
             done_wait.cancel()
         if not driver.done():
             driver.cancel()
         with contextlib.suppress(BaseException):
             await driver
-        for t in (pending_get, done_wait):
+        for t in (pending_token_get, pending_node_get, done_wait):
             if t is not None:
                 with contextlib.suppress(BaseException):
                     await t
@@ -600,15 +616,11 @@ async def _terminal_events(
         final_output.get("user_id", ""),
     )
 
-    # 节点事件：从 trace_steps 重建（保持旧接口：preflight/plan/execute/summarize/deny）
-    emitted: set[str] = set()
-    for step in final_output.get("trace_steps", []):
-        node_name = step.get("node", "")
-        if node_name in ("preflight", "plan", "execute", "summarize", "deny") and node_name not in emitted:
-            emitted.add(node_name)
-            ev = _node_to_event(node_name, final_output, run_id, thread_id)
-            if ev is not None:
-                events.append(ev)
+    # 节点事件（preflight/plan/execute/summarize/deny）已在图运行期间由
+    # ``_drive_graph`` 经 node_queue 实时发射，前端无需等待 done 即可看到进度。
+    # 此处不再从 trace_steps 重建，避免与实时发射重复。
+    # ``done`` 负责补齐最终答案、工具结果和运行统计。模型 token 是过程原文，
+    # 不能替代最终答案；前端始终以 done.answer 作为默认可见结果。
 
     events.append({
         "event": "done",
@@ -618,6 +630,7 @@ async def _terminal_events(
         "guard_decision": result["guard_decision"],
         "answer": result["answer"],
         "answer_source": result["answer_source"],
+        "tool_calls": result["tool_calls"],
         "stream_stats": {
             "ttft_ms": ttft,
             "total_ms": total_ms,
@@ -690,6 +703,9 @@ def _node_to_event(node_name: str, partial: dict[str, Any], run_id: str, thread_
                 "hidden_tools": partial.get("memory_context", {}).get("hidden_tools", [])}
     if node_name == "execute":
         return {"event": "execute", **base, "tool_calls": partial.get("tool_calls", [])}
+    if node_name == "readonly_execute":
+        result = partial.get("readonly_exec_result") or {}
+        return {"event": "execute", **base, "tool_calls": [result] if result else []}
     if node_name == "summarize":
         return {"event": "summarize", **base,
                 "answer": partial.get("answer", ""),
@@ -704,6 +720,10 @@ def _node_to_event(node_name: str, partial: dict[str, Any], run_id: str, thread_
 # ---------------------------------------------------------------------------
 # 流式背压与取消
 # ---------------------------------------------------------------------------
+
+# 实时节点进度通道容量。节点事件每轮仅数个（preflight/plan/execute/summarize/deny），
+# 64 远大于单轮可能产出的节点事件数，不会成为背压瓶颈；有界以避免无界增长。
+_NODE_QUEUE_CAPACITY = 64
 
 # run_id -> (owner event loop, owning stream task)。锁保护跨线程测试/管理调用，
 # 取消必须调度回 task 所属 loop，不能从客户端线程直接 Task.cancel()。

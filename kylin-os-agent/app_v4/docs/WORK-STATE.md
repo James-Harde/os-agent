@@ -1,6 +1,6 @@
 # app_v4 Current Work State
 
-Updated: 2026-08-04
+Updated: 2026-09-22
 
 This file is the single current progress source for `app_v4`. It records
 accepted facts and remaining gaps, not a chronological log.
@@ -19,11 +19,11 @@ modify `app`, `app_v2`, or `app_v3`.
 
 | Area | Status | Current fact |
 |---|---|---|
-| Agent main path | Core thin slice passed | async non-streaming `/api/chat` now awaits explicit `arun_agent()` with request-scoped Dependencies held for the full graph execution; consult, bounded read-only ReAct, real tools, Trace, and isolation pass focused regression |
+| Agent main path | Core thin slice passed | async non-streaming `/api/chat` now awaits explicit `arun_agent()` with request-scoped Dependencies held for the full graph execution; consult, bounded read-only ReAct, real tools, Trace, and isolation pass focused regression. The fake-model router now distinguishes general explanations such as disk-full causes (`consult`, zero tools) from current-machine diagnosis (`readonly_diagnosis`). |
 | Safety and HITL | Mostly complete | dangerous-request denial, injection handling, auto/confirm/deny policy, `interrupt()` and `Command(resume=...)`, audit, and idempotent approval behavior pass the async non-streaming regression |
 | MCP | Engineering PASS; transfer pending | 官方 FastMCP + Streamable HTTP；独立 Server 启动、官方 Client、`/api/chat`→MCP→真实工具 E2E、真实 DeepSeek 生产链均通过；最小权限、结构化错误、共享审计和生产 fail-fast 已有反回归测试 |
 | RAG | Core thin slice passed | real Ollama Embedding → Milvus dense + BM25 + RRF → cited results independently passes; retrieval evaluation and measured bad-case work remain later delivery items |
-| Streaming/performance | Accepted (focused gate) | `runner.py` uses public-v2 `astream(version="v2", stream_mode=["updates"])`; the node (incl. model) runs inline in the driver task via the single-task fast path, so disconnect `CancelledError` reaches the model `_astream`. `model_invoke_streaming` passes public `stream=True` to `ainvoke` so tokens flow via `on_llm_new_token`. Private `_StreamingCallbackHandler` marker removed. Focused SSE behavioral gate 11/11 pass (4 test_stream + 7 TestG5; lock this version — contract tests cover focused behavior, internal scheduling is NOT a public contract); full offline suite 166 passed + 13 real-marker deselected (2 real-model failures are pre-existing environmental `MCP_SERVER_URL`-empty gating, unrelated) |
+| Streaming/performance | Accepted; result-first UI contract tested (visual recheck pending) | Public-v2 streaming, backpressure, cancellation, and SSE parsing remain accepted. **Result-first repair (2026-09-22)**: `done.answer` is always the default-visible answer; raw model tokens stream into a collapsed process panel; tool calls/results appear in a collapsed result panel; readonly tool nodes emit realtime `execute`; `done.tool_calls` is the final authoritative copy. `/api/tools` now proxies the existing MCP Client (or explicit local test adapter), replacing the removed `/api/mcp` frontend request. Focused stream/API tests pass 11/11 and production MCP catalog/call test passes. The previous 2026-08-05 layout was browser-verified; the new result-first layout still needs one screenshot-level browser recheck because no browser automation/Playwright was available in this window. |
 | Lifecycle | Accepted | FastAPI `lifespan` owns `Dependencies.aclose()`; `aclose` is idempotent and nulls all checkpointer refs. `TestTwoAppTwoDb` now wraps both apps in `with TestClient` so lifespan runs and aiosqlite worker threads are stopped — 5x clean runs under `-W error::pytest.PytestUnhandledThreadExceptionWarning`. `reset()` no longer fire-and-forget closes async resources (deleted `_close_async_checkpointer_best_effort`); sync `reset` closes the sync sqlite3 connection only, async cleanup is owned by `aclose` |
 | Memory/context | Basic complete | thread checkpoints, SQLite long-term memory, user/thread isolation, TTL, and compression foundations exist |
 | Delivery evidence | Partial | automated tests are broad, but README, real-service smoke evidence, and interview notes are not complete |
@@ -254,6 +254,9 @@ adapters, tests, and configuration. Do not keep two production paths.
    mitigates but does not eliminate this.
 5. MCP engineering acceptance passed, but the user Stage 4 teach-back remains
    before the MCP learning chain is marked complete.
+6. The 2026-09-22 result-first frontend layout has API/DOM-contract coverage but
+   still needs one desktop/mobile browser visual recheck after the FastAPI
+   process is restarted.
 
 ## Current Evidence
 
@@ -271,6 +274,10 @@ adapters, tests, and configuration. Do not keep two production paths.
 | 真实 DeepSeek 只读 ReAct | ✅ PASS |
 | 异步依赖容器隔离（A=0，B>0） | ✅ 5 passed |
 | SSE v2 真流式/断连/隔离/背压 | ✅ focused behavioral gate 16/16 pass (lock this version; internal scheduling is not a public contract) |
+| 结果优先 SSE 展示 + 工具结果契约 | ✅ 11 passed; live `/api/tools` returned 8 tools; inline JS syntax valid |
+| 四路由示例 + 普通咨询直答 | ✅ 30-test router/SSE regression passed; welcome examples cover consult/readonly/knowledge/mutation |
+| 健康状态模型模式 | ✅ `/api/health` exposes non-secret fake/api mode; frontend labels fake model explicitly |
+| MCP Client 工具目录 + 真实调用 | ✅ 1 passed against native FastMCP Server |
 | FastAPI + AsyncSqliteSaver 生命周期 | ✅ 2026-08-04 accepted; 5x clean under warning-as-error |
 | `/api/chat` 核心聚焦回归 | ✅ 58 passed, 0 failed |
 | 默认离线回归 | ✅ 166 passed, 13 real-marker deselected, 2 environmental failures, 0 failed |
@@ -293,6 +300,13 @@ Active SSE baseline:
 ```powershell
 cd D:\klin-agent\kylin-os-agent
 .venv\Scripts\python -m pytest app_v4/tests/test_stream.py app_v4/tests/test_acceptance_blackbox.py::TestG5SSETokenStream app_v4/tests/test_acceptance_blackbox.py::TestG5Cancellation app_v4/tests/test_async_dependency_isolation.py -q -p no:cacheprovider -o addopts=""
+```
+
+Result-first UI contract (2026-09-22):
+
+```powershell
+cd D:\klin-agent\kylin-os-agent
+.venv\Scripts\python -m pytest app_v4/tests/test_stream_realtime.py app_v4/tests/test_tools_api.py app_v4/tests/test_stream.py -q --basetemp=app_v4/.pytest-tmp-result-ui-root -p no:cacheprovider
 ```
 
 Lifecycle gate (accepted 2026-08-04):
@@ -319,8 +333,8 @@ cd D:\klin-agent\kylin-os-agent
 2. ~~Lifecycle repair~~ — DONE (2026-08-04). Lifespan owns `aclose()`; tests use
    `with TestClient`; `reset()` no longer fire-and-forgets async close; 5x clean
    runs under warning-as-error.
-3. Real-model SSE smoke evidence: measured TTFT percentiles and end-to-end token
-   stream against a live model.
+3. Restart FastAPI and visually recheck the result-first layout once; then run
+   real-model SSE smoke evidence with measured TTFT percentiles.
 
 ## Documentation Rules
 

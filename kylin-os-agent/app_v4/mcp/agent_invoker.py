@@ -61,14 +61,17 @@ async def _streamable_list_tools(base_url: str) -> list[dict[str, Any]]:
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
-            return [
-                {
-                    "name": t.name,
-                    "description": t.description or "",
-                    "inputSchema": t.inputSchema if hasattr(t, "inputSchema") else {},
-                }
-                for t in tools.tools
-            ]
+            result: list[dict[str, Any]] = []
+            for tool in tools.tools:
+                payload = tool.model_dump(by_alias=True) if hasattr(tool, "model_dump") else {}
+                meta = payload.get("_meta") or payload.get("meta") or {}
+                result.append({
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "inputSchema": getattr(tool, "inputSchema", {}),
+                    "permission": meta.get("permission", "auto"),
+                })
+            return result
 
 
 def _run_async(coro):
@@ -151,6 +154,26 @@ class LocalToolInvoker:
         # 与生产 MCP transport 的区别：MCP 路径返回的结果含 _mcp_duration_ms 标记，
         # 本地路径不含该标记。不在此处篡改 source，避免破坏真实数据验证。
         return tool.invoke(arguments)
+
+    async def list_tools(self) -> list[dict[str, Any]]:
+        """列出本地测试适配器可用工具，结构与 MCP tools/list 保持一致。"""
+        from app_v4.tools.registry import get_tool_permission, get_tools
+
+        result: list[dict[str, Any]] = []
+        for tool in get_tools():
+            args_schema = getattr(tool, "args_schema", None)
+            input_schema = (
+                args_schema.model_json_schema()
+                if args_schema is not None and hasattr(args_schema, "model_json_schema")
+                else {"type": "object", "properties": {}}
+            )
+            result.append({
+                "name": tool.name,
+                "description": tool.description or "",
+                "inputSchema": input_schema,
+                "permission": get_tool_permission(tool.name),
+            })
+        return result
 
     def invoke_sync(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """同步封装（供 Graph 节点使用）。"""

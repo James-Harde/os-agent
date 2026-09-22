@@ -3,492 +3,1406 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>麒麟安全运维 Agent v4</title>
-  <!-- Tailwind + DaisyUI via CDN（无构建流程，开箱即用）-->
-  <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
-  <link href="https://cdn.jsdelivr.net/npm/daisyui@5/dist/full.css" rel="stylesheet" type="text/css" />
+  <title>系统安全运维 Agent v4</title>
   <style>
-    /* 自定义滚动条 + 打字机光标 */
-    .chat-box::-webkit-scrollbar { width: 6px; }
-    .chat-box::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
-    .typing::after {
-      content: "▍";
-      animation: blink 1s steps(1) infinite;
-      color: #38bdf8;
+    /* ============================================================
+       深色运维控制台调色板 —— 全部由 CSS 变量自包含定义，
+       不依赖任何外部主题。关键色（背景/文字/状态）必须在此显式声明，
+       以满足可读性与对比度要求。
+       ============================================================ */
+    :root {
+      --bg:        #0a1020;   /* 深蓝黑主背景 */
+      --bg-2:      #0e1526;   /* 次背景 */
+      --surface:   #131c33;   /* 卡片/输入区表面 */
+      --surface-2: #18223c;   /* 悬浮层 */
+      --border:    #243049;   /* 边框 */
+      --border-hi: #334466;   /* 高亮边框 */
+
+      --text:      #e8eef8;   /* 主文字 —— 清晰白 */
+      --text-dim:  #a3b2ce;   /* 次要文字 —— 可读，非细灰 */
+      --text-faint:#6f7d9a;   /* 辅助文字（时间戳等）*/
+
+      --primary:   #3b82f6;   /* 低饱和蓝主色 */
+      --primary-2: #60a5fa;   /* 亮蓝（文字用）*/
+      --primary-bg:#14233f;   /* 主色背景 */
+      --on-primary:#ffffff;
+
+      --success:   #22c55e;   /* 绿 —— 通过/成功 */
+      --success-bg:#0e2a18;
+      --warn:      #f59e0b;   /* 琥珀 —— 警告/工具调用中 */
+      --warn-bg:   #2a2208;
+      --danger:    #ef4444;   /* 红 —— 拒绝/失败 */
+      --danger-bg: #2a0e0e;
+      --info:      #38bdf8;   /* 天蓝 —— 分析中 */
+
+      --radius:    10px;
+      --radius-sm: 7px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+              "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      --mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace;
     }
-    @keyframes blink { 50% { opacity: 0; } }
-    .bubble-user { background: #1e3a5f; }
-    .bubble-ai { background: #1f2937; }
-    .badge-low { background: #064e3b; color: #6ee7b7; }
-    .badge-high { background: #7f1d1d; color: #fca5a5; }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: var(--font);
+      font-size: 15px;
+      line-height: 1.55;
+      color: var(--text);
+      background: var(--bg);
+      -webkit-font-smoothing: antialiased;
+    }
+    .hidden { display: none !important; }
+    .mono { font-family: var(--mono); }
+
+    /* ---------- 整体布局 ---------- */
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      min-height: 0;
+    }
+
+    /* ---------- 顶栏 ---------- */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 18px;
+      background: var(--bg-2);
+      border-bottom: 1px solid var(--border);
+      flex: 0 0 auto;
+    }
+    .brand { display: flex; align-items: baseline; gap: 10px; }
+    .brand-mark {
+      font-weight: 800;
+      font-size: 18px;
+      color: var(--primary-2);
+      letter-spacing: 1px;
+    }
+    .brand-title { font-size: 16px; font-weight: 600; color: var(--text); }
+    .brand-ver { font-size: 12px; color: var(--text-faint); }
+    .topbar-right { display: flex; align-items: center; gap: 12px; }
+
+    /* ---------- 主网格 ---------- */
+    .grid {
+      flex: 1 1 auto;
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 14px;
+      padding: 14px;
+      min-height: 0;
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+      .panel { max-height: 38vh; }
+    }
+
+    /* ---------- 聊天主区 ---------- */
+    .chat {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    /* 状态栏 */
+    .statusbar {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      padding: 8px 14px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+      flex: 0 0 auto;
+    }
+    .statusbar-group { display: flex; align-items: center; gap: 6px; }
+    .statusbar-group-grow { margin-left: auto; gap: 10px; }
+    .statusbar-label { font-size: 12px; color: var(--text-faint); }
+    .statusbar-value { font-size: 13px; color: var(--text); }
+    .statusbar-value.mono { font-family: var(--mono); color: var(--primary-2); }
+    .statusbar-meta { font-family: var(--mono); font-size: 12px; color: var(--text-faint); }
+
+    /* 状态药丸 */
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+    .status-pill::before {
+      content: "";
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .status-idle      { color: var(--text-dim);  background: var(--surface-2); border-color: var(--border); }
+    .status-connecting{ color: var(--info);      background: var(--primary-bg); border-color: var(--primary); }
+    .status-analyzing { color: var(--info);      background: var(--primary-bg); border-color: var(--primary); }
+    .status-tooling   { color: var(--warn);      background: var(--warn-bg);    border-color: var(--warn); }
+    .status-generating{ color: var(--primary-2); background: var(--primary-bg); border-color: var(--primary); }
+    .status-generating::before { animation: pulse 1.2s ease-in-out infinite; }
+    .status-done      { color: var(--success);   background: var(--success-bg); border-color: var(--success); }
+    .status-cancelled { color: var(--warn);      background: var(--warn-bg);    border-color: var(--warn); }
+    .status-error     { color: var(--danger);    background: var(--danger-bg);  border-color: var(--danger); }
+    @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.35;} }
+
+    /* 气泡聊天区 */
+    .chat-box {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding: 16px;
+      min-height: 0;
+      scroll-behavior: smooth;
+    }
+    .chat-box::-webkit-scrollbar { width: 8px; }
+    .chat-box::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 4px; }
+    .chat-box::-webkit-scrollbar-track { background: transparent; }
+
+    /* ---------- 欢迎态 ---------- */
+    .welcome {
+      max-width: 760px;
+      margin: 28px auto;
+      text-align: center;
+    }
+    .welcome-title { font-size: 22px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+    .welcome-sub { color: var(--text-dim); margin-bottom: 18px; }
+    .examples {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      text-align: left;
+    }
+
+    /* ---------- 消息气泡 ---------- */
+    .msg { margin-bottom: 16px; }
+    .msg-user { display: flex; justify-content: flex-end; }
+    .bubble {
+      max-width: 82%;
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .bubble-user {
+      background: var(--primary-bg);
+      border: 1px solid var(--primary);
+      color: var(--text);
+      border-bottom-right-radius: 3px;
+    }
+    .bubble-ai {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 3px;
+      white-space: normal;
+    }
+    .bubble-ai-error {
+      background: var(--danger-bg);
+      border: 1px solid var(--danger);
+      color: #fca5a5;
+    }
+    .bubble-meta { font-size: 11px; color: var(--text-faint); margin: 3px 0 8px; }
+
+    /* 步骤时间线（在 AI 气泡内） */
+    .step-timeline { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+    .step-card {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      padding: 7px 10px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-left-width: 3px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+    }
+    .step-card .step-icon { flex: 0 0 auto; font-size: 14px; line-height: 1.4; }
+    .step-card .step-body { flex: 1 1 auto; min-width: 0; }
+    .step-card .step-title { font-weight: 600; color: var(--text); }
+    .step-card .step-detail { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+    .step-card .step-tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .step-allow { border-left-color: var(--success); }
+    .step-deny  { border-left-color: var(--danger); }
+    .step-info  { border-left-color: var(--info); }
+    .step-warn  { border-left-color: var(--warn); }
+
+    /* 默认可见的最终结果 */
+    .final-result {
+      padding: 2px 0 10px;
+    }
+    .result-label {
+      color: var(--success);
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 5px;
+    }
+    .answer-text {
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.7;
+    }
+    .answer-pending { color: var(--text-dim); }
+    .result-meta {
+      color: var(--text-faint);
+      font-size: 11px;
+      margin-top: 7px;
+    }
+
+    /* 气泡内的过程信息：默认折叠，避免盖过最终结果 */
+    .message-details {
+      border-top: 1px solid var(--border);
+    }
+    .message-details > summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 0;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      list-style: none;
+      user-select: none;
+    }
+    .message-details > summary::-webkit-details-marker { display: none; }
+    .message-details > summary::after { content: "+"; color: var(--text-faint); }
+    .message-details[open] > summary::after { content: "−"; }
+    .detail-title { flex: 1 1 auto; }
+    .detail-meta { color: var(--text-faint); font-family: var(--mono); font-weight: 400; }
+    .detail-body { padding: 0 0 10px; }
+
+    .model-stream-content {
+      max-height: 260px;
+      overflow: auto;
+      margin: 0;
+      padding: 9px 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text-dim);
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .tool-results { display: flex; flex-direction: column; gap: 8px; }
+    .tool-result-item {
+      padding: 8px 10px;
+      background: var(--bg);
+      border-left: 3px solid var(--border-hi);
+      border-radius: var(--radius-sm);
+    }
+    .tool-result-success { border-left-color: var(--success); }
+    .tool-result-error { border-left-color: var(--danger); }
+    .tool-result-pending { border-left-color: var(--warn); }
+    .tool-result-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 3px;
+    }
+    .tool-result-name { color: var(--primary-2); font-family: var(--mono); font-size: 12px; }
+    .tool-result-meta { color: var(--text-faint); font-size: 11px; margin-bottom: 6px; }
+    .tool-result-label { color: var(--text-dim); font-size: 11px; margin-top: 6px; }
+    .tool-result-json {
+      max-height: 240px;
+      overflow: auto;
+      margin: 3px 0 0;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* ---------- 输入栏 ---------- */
+    .inputbar {
+      display: flex;
+      gap: 8px;
+      padding: 12px 14px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      flex: 0 0 auto;
+    }
+    .input {
+      flex: 1 1 auto;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      padding: 11px 14px;
+      font-size: 15px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .input:focus { border-color: var(--primary); }
+    .input:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ---------- 按钮 ---------- */
+    .btn {
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+      border-radius: var(--radius-sm);
+      padding: 9px 16px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .15s;
+      white-space: nowrap;
+    }
+    .btn:hover { border-color: var(--border-hi); background: var(--surface); }
+    .btn:active { transform: translateY(1px); }
+    .btn-primary { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+    .btn-primary:hover { background: var(--primary-2); border-color: var(--primary-2); }
+    .btn-danger  { background: var(--danger-bg); border-color: var(--danger); color: #fca5a5; }
+    .btn-danger:hover { background: var(--danger); color: #fff; }
+    .btn-ghost   { background: transparent; }
+    .btn-xs { padding: 3px 9px; font-size: 12px; }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* ---------- 右侧面板 ---------- */
+    .panel {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    .panel::-webkit-scrollbar { width: 8px; }
+    .panel::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 4px; }
+
+    .collapsible {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .collapsible > summary {
+      cursor: pointer;
+      padding: 10px 14px;
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--text);
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      user-select: none;
+    }
+    .collapsible > summary::after { content: "▾"; color: var(--text-faint); }
+    .collapsible[open] > summary::after { content: "▴"; }
+    .collapsible > summary::-webkit-details-marker { display: none; }
+    .collapsible-body { padding: 10px 14px 14px; }
+
+    .panel-row {
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 13px; color: var(--text-dim); margin-bottom: 8px;
+    }
+
+    /* 工具列表 */
+    .tool-list { display: flex; flex-direction: column; gap: 5px; max-height: 200px; overflow-y: auto; }
+    .tool-item {
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 12px; padding: 5px 8px; border-radius: 6px;
+      background: var(--surface); border: 1px solid var(--border);
+    }
+    .tool-name { font-family: var(--mono); color: var(--primary-2); }
+    .perm { font-size: 11px; padding: 1px 6px; border-radius: 999px; }
+    .perm-auto    { color: var(--success); background: var(--success-bg); }
+    .perm-confirm { color: var(--warn);    background: var(--warn-bg); }
+    .perm-deny    { color: var(--danger);  background: var(--danger-bg); }
+
+    /* badge */
+    .badge {
+      display: inline-block; padding: 1px 8px; border-radius: 999px;
+      font-size: 12px; font-weight: 600; background: var(--surface-2);
+      border: 1px solid var(--border); color: var(--text-dim);
+    }
+    .badge-info { color: var(--info); background: var(--primary-bg); border-color: var(--primary); }
+
+    /* 步骤卡内的工具小标签 */
+    .tag {
+      font-family: var(--mono); font-size: 11px; padding: 1px 7px;
+      border-radius: 5px; background: var(--bg); border: 1px solid var(--border);
+      color: var(--text-dim);
+    }
+    .tag-success { color: var(--success); border-color: var(--success); background: var(--success-bg); }
+    .tag-warn    { color: var(--warn);    border-color: var(--warn);    background: var(--warn-bg); }
+    .tag-danger  { color: var(--danger);  border-color: var(--danger);  background: var(--danger-bg); }
+
+    /* 审计列表 */
+    .audit-item {
+      display: flex; align-items: center; gap: 8px; font-size: 12px;
+      padding: 5px 0; border-bottom: 1px solid var(--border); color: var(--text-dim);
+    }
+    .audit-item:last-child { border-bottom: none; }
+
+    /* 审批卡片 */
+    .approval-card {
+      background: var(--warn-bg);
+      border: 1px solid var(--warn);
+      border-radius: var(--radius);
+      padding: 12px;
+    }
+    .approval-card h3 { margin: 0 0 10px; font-size: 14px; color: var(--warn); }
+    .approval-item {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 9px 11px; margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .approval-item .approval-head {
+      display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px;
+    }
+    .approval-item .approval-tool { font-family: var(--mono); font-weight: 700; color: var(--warn); }
+    .approval-item .approval-reason { color: var(--text-dim); margin-bottom: 7px; }
+    .approval-actions { display: flex; gap: 6px; }
+
+    .muted { color: var(--text-faint); font-size: 12px; }
+    .example {
+      background: var(--surface); border: 1px solid var(--border);
+      color: var(--text-dim); border-radius: var(--radius-sm); padding: 10px 12px;
+      min-width: 0; min-height: 64px; cursor: pointer; transition: all .15s;
+      display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+    }
+    .example:hover { border-color: var(--primary); color: var(--primary-2); }
+    .example-route {
+      color: var(--primary-2); font-family: var(--mono); font-size: 11px;
+      line-height: 1.3;
+    }
+    .example-prompt {
+      color: var(--text); font-family: var(--font); font-size: 13px;
+      line-height: 1.45; word-break: break-word;
+    }
+    @media (max-width: 620px) {
+      .examples { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
-<body class="bg-base-200 min-h-screen">
-  <div class="navbar bg-base-300 shadow-lg px-6">
-    <div class="flex-1">
-      <span class="text-xl font-bold text-info">麒麟安全运维 Agent</span>
-      <span class="text-xs text-base-content/60 ml-2">v4 · LangGraph · B/S Demo</span>
-    </div>
-    <div class="flex-none gap-2">
-      <span id="health-dot" class="badge badge-outline badge-warning">检查中...</span>
-      <button class="btn btn-sm btn-ghost" onclick="loadTools()">刷新工具</button>
-    </div>
-  </div>
+<body>
+  <div class="app">
+    <!-- ========== 顶栏 ========== -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">系统</span>
+        <span class="brand-title">安全运维 Agent</span>
+        <span class="brand-ver">v4 · LangGraph · B/S Demo</span>
+      </div>
+      <div class="topbar-right">
+        <span id="health-dot" class="status-pill status-connecting">检查中…</span>
+        <button class="btn btn-ghost" onclick="loadTools()">刷新工具</button>
+      </div>
+    </header>
 
-  <div class="container mx-auto p-4 max-w-7xl">
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+    <!-- ========== 主网格 ========== -->
+    <main class="grid">
 
-      <!-- =============== 左侧：聊天主区 =============== -->
-      <div class="lg:col-span-2 flex flex-col gap-3">
-        <!-- 状态栏 -->
-        <div class="card bg-base-100 shadow-sm p-3 flex flex-wrap gap-3 items-center text-sm">
-          <div class="flex items-center gap-2">
-            <span class="text-base-content/60">Thread:</span>
-            <span id="thread-id" class="font-mono text-info">-</span>
+      <!-- ===== 聊天主区 ===== -->
+      <section class="chat">
+        <div class="statusbar">
+          <div class="statusbar-group">
+            <span class="statusbar-label">Thread</span>
+            <span id="thread-id" class="statusbar-value mono">-</span>
             <button class="btn btn-xs btn-ghost" onclick="editThread()" title="输入已有 thread_id 继续对话">修改</button>
           </div>
-          <div class="flex items-center gap-2">
-            <span class="text-base-content/60">Intent:</span>
-            <span id="current-intent" class="badge badge-info badge-sm">-</span>
+          <div class="statusbar-group">
+            <span class="statusbar-label">Intent</span>
+            <span id="current-intent" class="statusbar-value badge badge-info">-</span>
           </div>
-          <div class="flex items-center gap-2">
-            <span class="text-base-content/60">Guard:</span>
-            <span id="current-guard" class="badge badge-sm">-</span>
+          <div class="statusbar-group">
+            <span class="statusbar-label">Guard</span>
+            <span id="current-guard" class="statusbar-value badge">-</span>
           </div>
-        </div>
-
-        <!-- 消息列表 -->
-        <div id="chat-box" class="card bg-base-100 shadow-md chat-box overflow-y-auto p-4 space-y-3"
-             style="min-height: 420px; max-height: 60vh;">
-          <div class="text-center text-base-content/40 text-sm py-8">
-            欢迎使用麒麟安全运维 Agent，请输入您的运维问题。<br/>
-            示例：<code class="text-info">知识库：磁盘使用率怎么查</code>、<code class="text-info">分析磁盘</code>、<code class="text-info">查询端口 8080</code>
+          <div class="statusbar-group statusbar-group-grow">
+            <span id="run-status" class="status-pill status-idle">就绪</span>
+            <span id="run-stats" class="statusbar-meta"></span>
           </div>
         </div>
 
-        <!-- 输入区 -->
-        <div class="card bg-base-100 shadow-md p-3">
-          <div class="join w-full">
-            <input id="msg-input" type="text" placeholder="输入运维问题..."
-                   class="input input-bordered join-item flex-1" onkeydown="if(event.key==='Enter')sendMessage()" />
-            <button id="send-btn" class="btn btn-info join-item" onclick="sendMessage()">发送</button>
-            <button id="cancel-btn" class="btn btn-error join-item hidden" onclick="cancelStream()">● 取消</button>
-          </div>
-          <div class="text-xs text-base-content/50 mt-1">
-            支持流式响应 · 多轮对话（自动保持 thread_id）· 按 Enter 发送 · 流式时可点「取消」中断
-          </div>
-        </div>
-      </div>
-
-      <!-- =============== 右侧：工具 + Trace =============== -->
-      <div class="flex flex-col gap-3">
-        <!-- 工具列表 -->
-        <div class="card bg-base-100 shadow-md p-4">
-          <h2 class="font-bold text-base mb-2 flex items-center justify-between">
-            <span>工具列表</span>
-            <span id="tool-count" class="badge badge-outline badge-sm">0</span>
-          </h2>
-          <div id="tool-list" class="space-y-1 text-sm max-h-48 overflow-y-auto">
-            <div class="text-base-content/40 text-xs">点击"刷新工具"加载</div>
-          </div>
-        </div>
-
-        <!-- Trace 查询 -->
-        <div class="card bg-base-100 shadow-md p-4">
-          <h2 class="font-bold text-base mb-2">Trace 查询</h2>
-          <div class="join w-full mb-2">
-            <input id="trace-input" type="text" placeholder="输入 run_id"
-                   class="input input-bordered input-sm join-item flex-1 font-mono text-xs" />
-            <button class="btn btn-sm btn-outline join-item" onclick="queryTrace()">查询</button>
-          </div>
-          <div id="trace-result" class="text-xs max-h-64 overflow-y-auto bg-base-200 rounded p-2 font-mono">
-            <div class="text-base-content/40">输入 run_id 查看 trace_steps</div>
+        <div id="chat-box" class="chat-box">
+          <!-- 欢迎态：3 个可点击示例，首屏无大块空白 -->
+          <div class="welcome" id="welcome">
+            <div class="welcome-title">系统安全运维 Agent</div>
+            <div class="welcome-sub">输入运维问题，实时观察 Agent 的分析、规划与执行过程。</div>
+            <div class="examples">
+              <button class="example" data-route="consult"
+                      data-prompt="磁盘空间经常不足有哪些常见原因？" onclick="useExample(this)">
+                <span class="example-route">consult · 普通咨询</span>
+                <span class="example-prompt">磁盘空间经常不足有哪些常见原因？</span>
+              </button>
+              <button class="example" data-route="readonly_diagnosis"
+                      data-prompt="分析当前磁盘使用情况" onclick="useExample(this)">
+                <span class="example-route">readonly_diagnosis · 只读诊断</span>
+                <span class="example-prompt">分析当前磁盘使用情况</span>
+              </button>
+              <button class="example" data-route="knowledge"
+                      data-prompt="知识库：如何查看磁盘使用率" onclick="useExample(this)">
+                <span class="example-route">knowledge · 知识库</span>
+                <span class="example-prompt">知识库：如何查看磁盘使用率</span>
+              </button>
+              <button class="example" data-route="mutation"
+                      data-prompt="重启 sshd 服务" onclick="useExample(this)">
+                <span class="example-route">mutation · 变更审批</span>
+                <span class="example-prompt">重启 sshd 服务</span>
+              </button>
+            </div>
           </div>
         </div>
 
-        <!-- 审计日志 -->
-        <div class="card bg-base-100 shadow-md p-4">
-          <h2 class="font-bold text-base mb-2 flex items-center justify-between">
-            <span>最近审计</span>
-            <button class="btn btn-xs btn-ghost" onclick="loadAudit()">刷新</button>
-          </h2>
-          <div id="audit-list" class="space-y-1 text-xs max-h-48 overflow-y-auto">
-            <div class="text-base-content/40">点击"刷新"加载</div>
-          </div>
+        <div class="inputbar">
+          <input id="msg-input" class="input" type="text"
+                 placeholder="输入运维问题，按 Enter 发送…"
+                 onkeydown="if(event.key==='Enter')sendMessage()" />
+          <button id="send-btn" class="btn btn-primary" onclick="sendMessage()">发送</button>
+          <button id="cancel-btn" class="btn btn-danger hidden" onclick="cancelStream()">■ 停止</button>
         </div>
+      </section>
 
-        <!-- 审批卡片（§5 Gate 2：前端展示真实审批卡片 + approve/reject/resume）-->
-        <div id="approval-card" class="card bg-base-100 shadow-md p-4 hidden border-2 border-warning">
-          <h2 class="font-bold text-base mb-2 flex items-center justify-between">
-            <span class="text-warning">⏳ 待人工审批</span>
-            <span id="approval-count" class="badge badge-warning badge-sm">0</span>
-          </h2>
-          <div id="approval-list" class="space-y-2 text-xs">
-            <div class="text-base-content/40">暂无待审批项</div>
+      <!-- ===== 右侧面板 ===== -->
+      <aside class="panel">
+        <details class="collapsible" open>
+          <summary>本次运行 Trace</summary>
+          <div class="collapsible-body">
+            <div id="live-trace" class="muted">运行后在此查看步骤时间线…</div>
           </div>
+        </details>
+
+        <details class="collapsible" open>
+          <summary>工具状态</summary>
+          <div class="collapsible-body">
+            <div class="panel-row">
+              <span>已加载工具</span>
+              <span id="tool-count" class="badge">0</span>
+            </div>
+            <div id="tool-list" class="tool-list">
+              <div class="muted">点击"刷新工具"加载</div>
+            </div>
+          </div>
+        </details>
+
+        <details class="collapsible">
+          <summary>最近审计</summary>
+          <div id="audit-list" class="collapsible-body">
+            <div class="muted">点击展开后刷新加载</div>
+          </div>
+        </details>
+
+        <!-- 审批卡片（§5 Gate 2：动态显示）-->
+        <div id="approval-card" class="approval-card hidden">
+          <h3>⏳ 待人工审批 <span id="approval-count" class="badge">0</span></h3>
+          <div id="approval-list"></div>
         </div>
-      </div>
-    </div>
+      </aside>
+    </main>
   </div>
 
-  <!-- =============== JavaScript =============== -->
-  <script>
-    // ---------- 全局状态 ----------
-    let currentThreadId = null;
-    const API = ""; // 同源部署，用相对路径
-    let pendingApprovals = [];   // 当前待审批列表
-    let lastApprovalRunId = null;
-    let lastApprovalThreadId = null;
+  <!-- SSE 解析纯函数（同源码浏览器/Node 运行，由 tests 单元测试覆盖）-->
+  <script src="/static/sse-parser.js"></script>
 
-    // ---------- 启动：健康检查 + 加载工具 ----------
-    window.addEventListener("load", async () => {
+  <script>
+    /* ===========================================================
+       全局状态
+       ============================================================ */
+    var API = ""; // 同源部署，用相对路径
+    var currentThreadId = null;
+    var currentAbortController = null;
+    var sseBuffer = "";            // SSE 解析残留缓冲
+    var runStatus = "idle";        // 当前运行状态机
+    var lastTrace = { steps: [], tools: [] }; // 本次运行 trace（右侧面板）
+    var pendingApprovals = [];
+    var lastApprovalRunId = null;
+    var lastApprovalThreadId = null;
+
+    // 当前正在流式输出的 AI 气泡 DOM 引用
+    var currentAssistant = null;   // { bubble, timeline, answer, hasTokens }
+
+    /* ===========================================================
+       启动
+       ============================================================ */
+    window.addEventListener("load", async function () {
       await checkHealth();
       await loadTools();
       await loadAudit();
     });
 
+    /* ===========================================================
+       健康检查
+       ============================================================ */
     async function checkHealth() {
+      var dot = document.getElementById("health-dot");
       try {
-        const r = await fetch(API + "/api/health");
-        const d = await r.json();
-        const dot = document.getElementById("health-dot");
+        var r = await fetch(API + "/api/health");
+        var d = await r.json();
         if (d.status === "ok") {
-          dot.className = "badge badge-outline badge-success";
-          dot.textContent = "在线 · " + d.engine;
+          dot.className = "status-pill status-done";
+          var modelLabel = d.model_mode === "fake"
+            ? "假模型"
+            : (d.model_name || "API 模型");
+          dot.textContent = "在线 · " + modelLabel;
+          dot.title = "工作流引擎：" + (d.engine || "-");
         } else {
-          dot.className = "badge badge-outline badge-error";
+          dot.className = "status-pill status-error";
           dot.textContent = "异常";
         }
       } catch (e) {
-        const dot = document.getElementById("health-dot");
-        dot.className = "badge badge-outline badge-error";
+        dot.className = "status-pill status-error";
         dot.textContent = "离线";
       }
     }
 
-    // ---------- 工具列表 ----------
+    /* ===========================================================
+       工具列表
+       ============================================================ */
     async function loadTools() {
       try {
-        const r = await fetch(API + "/api/mcp", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-        });
-        const d = await r.json();
-        const tools = d.result?.tools || [];
+        var r = await fetch(API + "/api/tools");
+        if (!r.ok) throw new Error("tools unavailable");
+        var d = await r.json();
+        var tools = d.tools || [];
         document.getElementById("tool-count").textContent = tools.length;
-        const html = tools.map(t => {
-          const permColor = t.permission === "auto" ? "text-success"
-                          : t.permission === "confirm" ? "text-warning" : "text-error";
-          return `<div class="flex items-center justify-between py-1 border-b border-base-200 last:border-0">
-            <span class="font-mono text-info">${t.name}</span>
-            <div class="flex items-center gap-1">
-              <span class="text-base-content/50 text-xs">${t.riskLevel === "low" ? "低风险" : "中风险"}</span>
-              <span class="${permColor} text-xs">●${t.permission}</span>
-            </div>
-          </div>`;
-        }).join("");
-        document.getElementById("tool-list").innerHTML = html || '<div class="text-base-content/40 text-xs">无工具</div>';
+        var html = "";
+        tools.forEach(function (t) {
+          var pc = t.permission === "auto" ? "perm-auto"
+                  : t.permission === "confirm" ? "perm-confirm" : "perm-deny";
+          var label = t.permission === "auto" ? "自动"
+                    : t.permission === "confirm" ? "需审批" : "禁止";
+          html += '<div class="tool-item">'
+                + '<span class="tool-name">' + esc(t.name) + '</span>'
+                + '<span class="perm ' + pc + '">' + label + '</span>'
+                + '</div>';
+        });
+        document.getElementById("tool-list").innerHTML =
+          html || '<div class="muted">无工具</div>';
       } catch (e) {
-        document.getElementById("tool-list").innerHTML = '<div class="text-error text-xs">加载失败</div>';
+        document.getElementById("tool-list").innerHTML =
+          '<div class="muted">加载失败</div>';
       }
     }
 
-    // ---------- 审计日志 ----------
+    /* ===========================================================
+       审计日志
+       ============================================================ */
     async function loadAudit() {
       try {
-        const r = await fetch(API + "/api/audit?limit=8");
-        const d = await r.json();
-        const items = d.items || [];
-        const html = items.map(it => `<div class="py-1 border-b border-base-200 last:border-0">
-          <span class="font-mono text-xs text-base-content/60">${it.run_id?.slice(0, 8)}</span>
-          <span class="ml-1">${it.intent || "-"}</span>
-          <span class="ml-1 ${it.guard_decision === "deny" ? "text-error" : "text-success"}">●${it.guard_decision}</span>
-        </div>`).join("");
-        document.getElementById("audit-list").innerHTML = html || '<div class="text-base-content/40 text-xs">无记录</div>';
-      } catch (e) {
-        document.getElementById("audit-list").innerHTML = '<div class="text-error text-xs">加载失败</div>';
-      }
-    }
-
-    // ---------- Trace 查询 ----------
-    async function queryTrace() {
-      const runId = document.getElementById("trace-input").value.trim();
-      if (!runId) { alert("请输入 run_id"); return; }
-      const box = document.getElementById("trace-result");
-      box.innerHTML = '<div class="text-base-content/40">查询中...</div>';
-      try {
-        const r = await fetch(API + "/api/traces/" + encodeURIComponent(runId));
-        if (r.status === 404) {
-          box.innerHTML = '<div class="text-error">未找到该 run_id</div>';
+        var r = await fetch(API + "/api/audit?limit=8");
+        var d = await r.json();
+        var items = d.items || [];
+        var box = document.getElementById("audit-list");
+        if (!items.length) {
+          box.innerHTML = '<div class="muted">无记录</div>';
           return;
         }
-        const d = await r.json();
-        const steps = d.trace_steps || [];
-        const tools = d.tool_calls || [];
-        let html = `<div class="text-info mb-1">Run: ${d.run_id?.slice(0, 12)}... | Intent: ${d.intent}</div>`;
-        html += `<div class="text-base-content/60 mb-1">Trace 节点 (${steps.length}):</div>`;
-        html += steps.map(s => `<div class="pl-2 border-l-2 border-base-300 mb-1">
-          <span class="text-info">${s.node}</span>
-          <span class="text-base-content/40 ml-1">${s.duration_ms}ms</span>
-          <div class="text-base-content/50 text-xs">${JSON.stringify(s.detail || {}).slice(0, 120)}</div>
-        </div>`).join("");
-        if (tools.length) {
-          html += `<div class="text-base-content/60 mt-2 mb-1">工具调用 (${tools.length}):</div>`;
-          html += tools.map(t => `<div class="pl-2 border-l-2 ${t.status === 'success' ? 'border-success' : 'border-error'} mb-1">
-            <span class="text-info">${t.tool_name}</span>
-            <span class="${t.status === 'success' ? 'text-success' : 'text-error'}">●${t.status}</span>
-            <span class="text-base-content/40 ml-1">${t.duration_ms || 0}ms</span>
-          </div>`).join("");
-        }
+        var html = "";
+        items.forEach(function (it) {
+          var gc = it.guard_decision === "deny" ? "tag-danger" : "tag-success";
+          html += '<div class="audit-item">'
+                + '<span class="mono">' + esc((it.run_id || "").slice(0, 8)) + '</span>'
+                + '<span>' + esc(it.intent || "-") + '</span>'
+                + '<span class="tag ' + gc + '">' + esc(it.guard_decision) + '</span>'
+                + '</div>';
+        });
         box.innerHTML = html;
       } catch (e) {
-        box.innerHTML = '<div class="text-error">查询失败: ' + e.message + '</div>';
+        document.getElementById("audit-list").innerHTML = '<div class="muted">加载失败</div>';
       }
     }
 
-    // ---------- 多轮对话：修改 thread_id ----------
+    /* ===========================================================
+       多轮对话：修改 thread_id
+       ============================================================ */
     function editThread() {
-      const existing = currentThreadId || "";
-      const input = prompt("输入 thread_id（留空则自动生成新对话）:", existing);
+      var existing = currentThreadId || "";
+      var input = prompt("输入 thread_id（留空则自动生成新对话）:", existing);
       if (input !== null) {
         currentThreadId = input.trim() || null;
-        document.getElementById("thread-id").textContent = currentThreadId || "（新对话）";
+        document.getElementById("thread-id").textContent =
+          currentThreadId ? currentThreadId.slice(0, 16) + "…" : "（新对话）";
       }
     }
 
-    // ---------- 流式控制（Gate 5 #3：前端取消按钮）----------
-    let currentAbortController = null;
+    /* ===========================================================
+       示例
+       ============================================================ */
+    function useExample(btn) {
+      var input = document.getElementById("msg-input");
+      input.value = btn.dataset.prompt || btn.textContent.trim();
+      input.focus();
+      sendMessage();
+    }
 
+    /* ===========================================================
+       状态机
+       ============================================================ */
+    function setStatus(s) {
+      runStatus = s;
+      var el = document.getElementById("run-status");
+      var map = {
+        idle: ["status-idle", "就绪"],
+        connecting: ["status-connecting", "正在连接…"],
+        analyzing: ["status-analyzing", "正在分析"],
+        tooling: ["status-tooling", "正在调用工具"],
+        generating: ["status-generating", "正在生成回答"],
+        done: ["status-done", "已完成"],
+        cancelled: ["status-cancelled", "已停止生成"],
+        error: ["status-error", "失败"],
+      };
+      var m = map[s] || map.idle;
+      el.className = "status-pill " + m[0];
+      el.textContent = m[1];
+    }
+
+    function setRunStats(text) {
+      document.getElementById("run-stats").textContent = text || "";
+    }
+
+    /* ===========================================================
+       取消
+       ============================================================ */
     function cancelStream() {
       if (currentAbortController) {
         currentAbortController.abort();
         currentAbortController = null;
       }
-      const btn = document.getElementById("cancel-btn");
-      if (btn) btn.classList.add("hidden");
+      showCancel(false);
     }
 
-    // ---------- 发送消息（流式）----------
+    function showCancel(visible) {
+      var btn = document.getElementById("cancel-btn");
+      if (visible) btn.classList.remove("hidden");
+      else btn.classList.add("hidden");
+    }
+
+    /* ===========================================================
+       发送消息（流式）
+       ============================================================ */
     async function sendMessage() {
-      const input = document.getElementById("msg-input");
-      const msg = input.value.trim();
+      var input = document.getElementById("msg-input");
+      var msg = input.value.trim();
       if (!msg) return;
+      if (runStatus === "connecting" || runStatus === "generating" ||
+          runStatus === "analyzing" || runStatus === "tooling") {
+        return; // 已在运行中，忽略重复发送（用户应点"停止"）
+      }
       input.value = "";
-      // 取消上一个仍在流的请求
       cancelStream();
       currentAbortController = new AbortController();
-      const signal = currentAbortController.signal;
-      const cancelBtn = document.getElementById("cancel-btn");
-      if (cancelBtn) cancelBtn.classList.remove("hidden");
+      var signal = currentAbortController.signal;
+      showCancel(true);
+      setRunStats("");
+      lastTrace = { steps: [], tools: [] };
 
-      // 用户气泡
-      appendBubble("user", msg);
-      // AI 占位气泡（打字机）
-      const aiBubble = appendBubble("ai", "", true);
+      appendUserBubble(msg);
+      currentAssistant = appendAssistantBubble(); // 创建 AI 气泡骨架
+      setStatus("connecting");
 
-      const payload = { message: msg };
+      var payload = { message: msg };
       if (currentThreadId) payload.thread_id = currentThreadId;
 
       try {
-        const resp = await fetch(API + "/api/chat/stream", {
+        var resp = await fetch(API + "/api/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
-          signal,  // Gate 5 #3：支持客户端取消
+          signal,
         });
 
         if (!resp.ok) {
-          aiBubble.innerHTML = '<span class="text-error">请求失败: ' + resp.status + '</span>';
-          aiBubble.classList.remove("typing");
+          setAssistantFatalError("请求失败: " + resp.status);
+          setStatus("error");
+          showCancel(false);
           return;
         }
 
-        // 用 ReadableStream 读 SSE（支持 POST body，比 EventSource 更灵活）
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let finalAnswer = "";
-        let toolCalls = [];
+        // 用 ReadableStream + TextDecoder 读 SSE，经 sse-parser 纯函数解析。
+        var reader = resp.body.getReader();
+        var decoder = new TextDecoder();
+        sseBuffer = "";
 
         while (true) {
-          const { done, value } = await reader.read();
+          var { done, value } = await reader.read();
           if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          // 按行解析 SSE
-          const lines = buffer.split("\n");
-          buffer = lines.pop(); // 最后一行可能不完整，留到下次
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            let event;
-            try { event = JSON.parse(line.slice(6)); } catch (e) { continue; }
-
-            handleSSEEvent(event, aiBubble, (ans) => { finalAnswer = ans; },
-              (tc) => { toolCalls = tc; });
-          }
+          var chunk = decoder.decode(value, { stream: true });
+          var r = SSEParser.parseSSEChunk(sseBuffer, chunk);
+          sseBuffer = r.buffer;
+          r.events.forEach(function (ev) { handleSSEEvent(ev); });
         }
+        // decoder.flush：冲刷多字节字符残留
+        var tail = decoder.decode();
+        var r2 = SSEParser.parseSSEChunk(sseBuffer, tail);
+        r2.events.forEach(function (ev) { handleSSEEvent(ev); });
+        SSEParser.parseSSEFlush(r2.buffer).forEach(function (ev) { handleSSEEvent(ev); });
 
-        aiBubble.classList.remove("typing");
-        // 刷新审计
-        loadAudit();
+        // 流正常结束：若尚未被 done/cancel/error 标记，置为 done
+        if (runStatus === "generating" || runStatus === "tooling" ||
+            runStatus === "analyzing" || runStatus === "connecting") {
+          setStatus("done");
+        }
       } catch (e) {
-        aiBubble.classList.remove("typing");
         if (e.name === "AbortError") {
-          appendMeta(aiBubble, "⏹ 已取消");
+          setAssistantCancelled();
+          setStatus("cancelled");
         } else {
-          aiBubble.innerHTML = '<span class="text-error">连接失败: ' + e.message + '</span>';
+          setAssistantFatalError("连接失败: " + e.message);
+          setStatus("error");
         }
       } finally {
-        // Gate 5 #3：流结束/取消后隐藏取消按钮
         currentAbortController = null;
-        const btn = document.getElementById("cancel-btn");
-        if (btn) btn.classList.add("hidden");
+        showCancel(false);
+        currentAssistant = null;
+        loadAudit();
       }
     }
 
-    // ---------- 处理 SSE 事件 ----------
-    function handleSSEEvent(event, aiBubble, onAnswer, onTools) {
-      const type = event.event;
+    /* ===========================================================
+       气泡渲染
+       ============================================================ */
+    function chatBox() { return document.getElementById("chat-box"); }
 
-      if (type === "preflight") {
-        updateGuard(event.guard_decision);
-      } else if (type === "plan") {
-        document.getElementById("current-intent").textContent = event.intent || "-";
-        // 展示规划的工具
-        const tools = (event.plan || []).map(p => p.tool).join(", ") || "无";
-        appendMeta(aiBubble, `📋 规划: ${tools}`);
-      } else if (type === "execute") {
-        const calls = event.tool_calls || [];
-        onTools(calls);
-        calls.forEach(c => {
-          const icon = c.status === "success" ? "✅" : c.status === "pending_approval" ? "⏳" : "❌";
-          appendMeta(aiBubble, `${icon} ${c.tool_name} · ${c.status} · ${c.duration_ms || 0}ms`);
+    function scrollChat() {
+      var box = chatBox();
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function hideWelcome() {
+      var w = document.getElementById("welcome");
+      if (w) w.classList.add("hidden");
+    }
+
+    function appendUserBubble(text) {
+      hideWelcome();
+      var box = chatBox();
+      var wrap = document.createElement("div");
+      wrap.className = "msg msg-user";
+      var b = document.createElement("div");
+      b.className = "bubble bubble-user";
+      b.textContent = text; // 安全渲染
+      wrap.appendChild(b);
+      box.appendChild(wrap);
+      scrollChat();
+    }
+
+    // 创建 AI 气泡骨架：最终结果默认可见，过程信息默认折叠。
+    function appendAssistantBubble() {
+      hideWelcome();
+      var box = chatBox();
+      var wrap = document.createElement("div");
+      wrap.className = "msg";
+
+      var bubble = document.createElement("div");
+      bubble.className = "bubble bubble-ai";
+
+      var result = document.createElement("div");
+      result.className = "final-result";
+
+      var resultLabel = document.createElement("div");
+      resultLabel.className = "result-label";
+      resultLabel.textContent = "最终结果";
+
+      var answer = document.createElement("div");
+      answer.className = "answer-text answer-pending";
+      answer.textContent = "正在生成最终结果…";
+
+      var resultMeta = document.createElement("div");
+      resultMeta.className = "result-meta";
+
+      result.appendChild(resultLabel);
+      result.appendChild(answer);
+      result.appendChild(resultMeta);
+
+      var toolDetails = document.createElement("details");
+      toolDetails.className = "message-details hidden";
+      var toolSummary = document.createElement("summary");
+      var toolTitle = document.createElement("span");
+      toolTitle.className = "detail-title";
+      toolTitle.textContent = "工具调用结果";
+      var toolCount = document.createElement("span");
+      toolCount.className = "detail-meta";
+      toolSummary.appendChild(toolTitle);
+      toolSummary.appendChild(toolCount);
+      var toolResults = document.createElement("div");
+      toolResults.className = "detail-body tool-results";
+      toolDetails.appendChild(toolSummary);
+      toolDetails.appendChild(toolResults);
+
+      var modelDetails = document.createElement("details");
+      modelDetails.className = "message-details";
+      var modelSummary = document.createElement("summary");
+      var modelTitle = document.createElement("span");
+      modelTitle.className = "detail-title";
+      modelTitle.textContent = "模型流式过程";
+      var modelStatus = document.createElement("span");
+      modelStatus.className = "detail-meta";
+      modelStatus.textContent = "等待输出";
+      modelSummary.appendChild(modelTitle);
+      modelSummary.appendChild(modelStatus);
+      var modelBody = document.createElement("div");
+      modelBody.className = "detail-body";
+      var modelStream = document.createElement("pre");
+      modelStream.className = "model-stream-content";
+      var streamText = document.createTextNode("");
+      modelStream.appendChild(streamText);
+      modelBody.appendChild(modelStream);
+      modelDetails.appendChild(modelSummary);
+      modelDetails.appendChild(modelBody);
+
+      var stepsDetails = document.createElement("details");
+      stepsDetails.className = "message-details";
+      var stepsSummary = document.createElement("summary");
+      var stepsTitle = document.createElement("span");
+      stepsTitle.className = "detail-title";
+      stepsTitle.textContent = "运行步骤";
+      stepsSummary.appendChild(stepsTitle);
+      var timeline = document.createElement("div");
+      timeline.className = "detail-body step-timeline";
+      stepsDetails.appendChild(stepsSummary);
+      stepsDetails.appendChild(timeline);
+
+      bubble.appendChild(result);
+      bubble.appendChild(toolDetails);
+      bubble.appendChild(modelDetails);
+      bubble.appendChild(stepsDetails);
+      wrap.appendChild(bubble);
+      box.appendChild(wrap);
+      scrollChat();
+
+      return {
+        bubble: bubble,
+        timeline: timeline,
+        answer: answer,
+        resultMeta: resultMeta,
+        toolDetails: toolDetails,
+        toolCount: toolCount,
+        toolResults: toolResults,
+        modelStatus: modelStatus,
+        streamText: streamText,
+        hasTokens: false,
+        tokenCount: 0,
+        toolCalls: []
+      };
+    }
+
+    // token 是模型过程原文，实时追加到折叠区，不覆盖最终答案。
+    function appendToken(text) {
+      if (!currentAssistant) return;
+      currentAssistant.hasTokens = true;
+      currentAssistant.tokenCount += 1;
+      currentAssistant.streamText.appendData(text);
+      currentAssistant.modelStatus.textContent =
+        "生成中 · " + currentAssistant.tokenCount + " tokens";
+    }
+
+    function setFinalAnswer(text, source) {
+      if (!currentAssistant || !text) return;
+      currentAssistant.answer.classList.remove("answer-pending");
+      currentAssistant.answer.textContent = text;
+      currentAssistant.resultMeta.textContent = source ? "来源：" + source : "";
+      scrollChat();
+    }
+
+    function stringifyForDisplay(value) {
+      if (typeof value === "string") return value;
+      try {
+        var text = JSON.stringify(value, null, 2);
+        return text == null ? String(value) : text;
+      } catch (e) {
+        return String(value);
+      }
+    }
+
+    function toolCallKey(call) {
+      if (call.invocation_id) return "invocation:" + call.invocation_id;
+      if (call.approval_id) return "approval:" + call.approval_id;
+      return (call.tool_name || "unknown") + ":" + stringifyForDisplay(call.arguments || {});
+    }
+
+    function renderToolResults(calls, replace) {
+      if (!currentAssistant) return;
+      calls = calls || [];
+      if (replace) {
+        currentAssistant.toolCalls = calls.slice();
+      } else {
+        calls.forEach(function (call) {
+          var key = toolCallKey(call);
+          var index = currentAssistant.toolCalls.findIndex(function (existing) {
+            return toolCallKey(existing) === key;
+          });
+          if (index >= 0) currentAssistant.toolCalls[index] = call;
+          else currentAssistant.toolCalls.push(call);
         });
-      } else if (type === "summarize" || type === "deny") {
-        const answer = event.answer || "";
-        onAnswer(answer);
-        aiBubble.innerHTML = renderMarkdown(answer);
-        if (event.thread_id) {
-          currentThreadId = event.thread_id;
-          document.getElementById("thread-id").textContent = event.thread_id.slice(0, 16) + "...";
-        }
-      } else if (type === "loop") {
-        appendMeta(aiBubble, `🔁 循环熔断: ${event.reason || ""}`);
-      } else if (type === "done") {
-        // 最终同步
-        if (event.thread_id) {
-          currentThreadId = event.thread_id;
-          document.getElementById("thread-id").textContent = event.thread_id.slice(0, 16) + "...";
-        }
-        if (event.intent) document.getElementById("current-intent").textContent = event.intent;
-        if (event.guard_decision) updateGuard(event.guard_decision);
-        // 把 run_id 填入 trace 输入框，方便一键查询
-        if (event.run_id) document.getElementById("trace-input").value = event.run_id;
-        // §5 Gate 2：收到 approval_required → 渲染审批卡片
-        if (event.approval_required && event.pending_approvals?.length) {
-          pendingApprovals = event.pending_approvals;
-          lastApprovalRunId = event.run_id;
-          lastApprovalThreadId = event.thread_id;
+      }
+
+      var allCalls = currentAssistant.toolCalls;
+      if (!allCalls.length) {
+        currentAssistant.toolDetails.classList.add("hidden");
+        return;
+      }
+
+      currentAssistant.toolDetails.classList.remove("hidden");
+      currentAssistant.toolCount.textContent = allCalls.length + " 次";
+      currentAssistant.toolResults.textContent = "";
+
+      allCalls.forEach(function (call) {
+        var status = call.status || "unknown";
+        var item = document.createElement("div");
+        var kind = status === "success" ? "tool-result-success"
+                 : status === "pending_approval" ? "tool-result-pending"
+                 : "tool-result-error";
+        item.className = "tool-result-item " + kind;
+
+        var head = document.createElement("div");
+        head.className = "tool-result-head";
+        var name = document.createElement("span");
+        name.className = "tool-result-name";
+        name.textContent = call.tool_name || "unknown_tool";
+        var badge = document.createElement("span");
+        badge.className = "tag " + (status === "success" ? "tag-success"
+                          : status === "pending_approval" ? "tag-warn" : "tag-danger");
+        badge.textContent = status;
+        head.appendChild(name);
+        head.appendChild(badge);
+        item.appendChild(head);
+
+        var meta = document.createElement("div");
+        meta.className = "tool-result-meta";
+        var metaParts = [];
+        if (call.duration_ms != null) metaParts.push(call.duration_ms + "ms");
+        if (call.source) metaParts.push("source: " + call.source);
+        meta.textContent = metaParts.join(" · ");
+        item.appendChild(meta);
+
+        var argsLabel = document.createElement("div");
+        argsLabel.className = "tool-result-label";
+        argsLabel.textContent = "调用参数";
+        item.appendChild(argsLabel);
+        var args = document.createElement("pre");
+        args.className = "tool-result-json";
+        args.textContent = stringifyForDisplay(call.arguments || {});
+        item.appendChild(args);
+
+        var dataLabel = document.createElement("div");
+        dataLabel.className = "tool-result-label";
+        dataLabel.textContent = "返回结果";
+        item.appendChild(dataLabel);
+        var data = document.createElement("pre");
+        data.className = "tool-result-json";
+        data.textContent = stringifyForDisplay(
+          call.data != null ? call.data : { error: call.error || "无返回数据" }
+        );
+        item.appendChild(data);
+
+        currentAssistant.toolResults.appendChild(item);
+      });
+    }
+
+    // 在步骤时间线追加一张步骤卡
+    function addStepCard(title, detail, kind, extras) {
+      if (!currentAssistant) return;
+      var icons = { allow: "✓", deny: "✗", info: "◎", warn: "!" };
+      var clsMap = { allow: "step-allow", deny: "step-deny", info: "step-info", warn: "step-warn" };
+      var card = document.createElement("div");
+      card.className = "step-card " + (clsMap[kind] || "step-info");
+
+      var icon = document.createElement("div");
+      icon.className = "step-icon";
+      icon.textContent = icons[kind] || "◎";
+
+      var body = document.createElement("div");
+      body.className = "step-body";
+
+      var t = document.createElement("div");
+      t.className = "step-title";
+      t.textContent = title;
+      body.appendChild(t);
+
+      if (detail) {
+        var d = document.createElement("div");
+        d.className = "step-detail";
+        d.textContent = detail;
+        body.appendChild(d);
+      }
+
+      // 工具标签（plan / execute 卡）
+      if (extras && extras.tools && extras.tools.length) {
+        var tools = document.createElement("div");
+        tools.className = "step-tools";
+        extras.tools.forEach(function (tool) {
+          var tag = document.createElement("span");
+          tag.className = "tag " + (tool.cls || "");
+          tag.textContent = tool.label;
+          tools.appendChild(tag);
+        });
+        body.appendChild(tools);
+      }
+
+      card.appendChild(icon);
+      card.appendChild(body);
+      currentAssistant.timeline.appendChild(card);
+      scrollChat();
+    }
+
+    function setAssistantCancelled() {
+      if (!currentAssistant) return;
+      if (currentAssistant.answer.classList.contains("answer-pending")) {
+        currentAssistant.answer.textContent = "生成已停止，未得到完整结果。";
+        currentAssistant.answer.classList.remove("answer-pending");
+      }
+      currentAssistant.modelStatus.textContent =
+        "已停止 · " + currentAssistant.tokenCount + " tokens";
+      var note = document.createElement("div");
+      note.className = "bubble-meta";
+      note.textContent = "⏹ 已停止生成";
+      currentAssistant.bubble.appendChild(note);
+      scrollChat();
+    }
+
+    function setAssistantFatalError(text) {
+      if (!currentAssistant) return;
+      currentAssistant.bubble.classList.remove("bubble-ai");
+      currentAssistant.bubble.classList.add("bubble-ai-error");
+      currentAssistant.bubble.textContent = text;
+      scrollChat();
+    }
+
+    /* ===========================================================
+       SSE 事件处理
+       ============================================================ */
+    function handleSSEEvent(ev) {
+      if (!ev || !ev.event) return;
+      switch (ev.event) {
+        case "token":
+          // 实时消费：每个 delta 立即追加到回答区
+          appendToken(ev.delta || "");
+          if (runStatus !== "generating") setStatus("generating");
+          break;
+
+        case "preflight":
+          updateGuard(ev.guard_decision);
+          var kind = ev.guard_decision === "deny" ? "deny" : "allow";
+          addStepCard(
+            "安全预检" + (ev.guard_decision === "deny" ? " —— 拒绝" : " —— 通过"),
+            (ev.guard_reasons && ev.guard_reasons.length)
+              ? ev.guard_reasons.join("；") : "",
+            kind
+          );
+          lastTrace.steps.push({ title: "安全预检", kind: kind });
+          if (runStatus === "connecting") setStatus("analyzing");
+          break;
+
+        case "plan":
+          document.getElementById("current-intent").textContent = ev.intent || "-";
+          var tools = (ev.plan || []).map(function (p) {
+            return { label: p.tool, cls: "" };
+          });
+          addStepCard(
+            "规划" + (ev.progressive ? "（渐进披露）" : ""),
+            "意图：" + (ev.intent || "-"),
+            "info",
+            { tools: tools }
+          );
+          lastTrace.steps.push({ title: "规划", kind: "info", tools: ev.plan });
+          lastTrace.tools = ev.plan || [];
+          refreshLiveTrace();
+          if (runStatus === "connecting") setStatus("analyzing");
+          break;
+
+        case "execute":
+          var calls = ev.tool_calls || [];
+          renderToolResults(calls, false);
+          calls.forEach(function (c) {
+            var cls = c.status === "success" ? "tag-success"
+                    : c.status === "pending_approval" ? "tag-warn"
+                    : c.status === "error" ? "tag-danger" : "";
+            lastTrace.tools.push({ label: c.tool_name + " · " + c.status, cls: cls });
+          });
+          var succ = calls.filter(function (c) { return c.status === "success"; }).length;
+          var pending = calls.filter(function (c) { return c.status === "pending_approval"; }).length;
+          addStepCard(
+            "执行工具",
+            calls.length + " 个工具，成功 " + succ +
+              (pending ? "，待审批 " + pending : ""),
+            pending ? "warn" : "allow",
+            { tools: lastTrace.tools.slice(-calls.length) }
+          );
+          lastTrace.steps.push({ title: "执行", kind: pending ? "warn" : "allow" });
+          refreshLiveTrace();
+          setStatus("tooling");
+          break;
+
+        case "summarize":
+          setFinalAnswer(ev.answer || "", ev.answer_source || "");
+          setStatus("generating");
+          break;
+
+        case "deny":
+          setFinalAnswer(ev.answer || "", ev.answer_source || "");
+          setStatus("done");
+          break;
+
+        case "loop":
+          addStepCard("循环熔断", ev.reason || "", "warn");
+          break;
+
+        case "done":
+          applyDone(ev);
+          setStatus("done");
+          break;
+
+        case "approval_required":
+          // HITL：可能逐条到达，累积后渲染审批卡
+          pendingApprovals.push(ev);
+          lastApprovalRunId = ev.run_id || lastApprovalRunId;
+          lastApprovalThreadId = ev.thread_id || lastApprovalThreadId;
           renderApprovalCard();
-        }
+          break;
+
+        case "error":
+          // parser 产出的事件（如 JSON 解析失败）
+          appendToken("\n[解析错误] " + (ev.reason || ""));
+          break;
+
+        default:
+          break;
       }
     }
 
-    // ---------- 气泡渲染 ----------
-    function appendBubble(role, text, typing = false) {
-      const box = document.getElementById("chat-box");
-      const div = document.createElement("div");
-      const isUser = role === "user";
-      div.className = `chat ${isUser ? "chat-end" : "chat-start"}`;
-      const bubbleClass = isUser ? "bubble-user" : "bubble-ai";
-      const textColor = isUser ? "text-primary-content" : "text-base-content";
-      div.innerHTML = `<div class="chat-bubble ${bubbleClass} ${textColor} ${typing ? "typing" : ""} whitespace-pre-wrap">${escapeHtml(text)}</div>`;
-      box.appendChild(div);
-      box.scrollTop = box.scrollHeight;
-      return div.querySelector(".chat-bubble");
-    }
+    function applyDone(ev) {
+      if (ev.thread_id) {
+        currentThreadId = ev.thread_id;
+        document.getElementById("thread-id").textContent =
+          ev.thread_id.slice(0, 16) + "…";
+      }
+      if (ev.intent) {
+        document.getElementById("current-intent").textContent = ev.intent;
+      }
+      if (ev.guard_decision) updateGuard(ev.guard_decision);
 
-    // 在 AI 气泡下方追加元信息（工具调用状态）
-    function appendMeta(aiBubble, text) {
-      const meta = document.createElement("div");
-      meta.className = "text-xs text-base-content/60 mt-1 pl-2 border-l-2 border-info";
-      meta.textContent = text;
-      aiBubble.appendChild(meta);
-      // 滚动到底
-      const box = document.getElementById("chat-box");
-      box.scrollTop = box.scrollHeight;
+      // 显示 TTFT / 总耗时 / token 数
+      var stats = ev.stream_stats || {};
+      var parts = [];
+      if (stats.ttft_ms != null) parts.push("TTFT " + stats.ttft_ms + "ms");
+      if (stats.total_ms != null) parts.push("总 " + stats.total_ms + "ms");
+      if (stats.token_count != null) parts.push(stats.token_count + " tokens");
+      setRunStats(parts.join("  ·  "));
+
+      // done.answer 是权威最终结果；token 只保留在折叠的模型过程区。
+      if (!currentAssistant) return;
+      setFinalAnswer(ev.answer || "本次运行没有生成最终结果。", ev.answer_source || "");
+      renderToolResults(ev.tool_calls || [], true);
+      currentAssistant.modelStatus.textContent =
+        "已完成 · " + currentAssistant.tokenCount + " tokens";
+
+      // run_id 已保留在 lastApprovalRunId，供需要时使用
+      if (ev.run_id) lastApprovalRunId = ev.run_id;
     }
 
     function updateGuard(decision) {
-      const el = document.getElementById("current-guard");
+      var el = document.getElementById("current-guard");
       el.textContent = decision;
-      el.className = "badge badge-sm " + (decision === "deny" ? "badge-high" : "badge-low");
+      el.className = "statusbar-value badge " +
+        (decision === "deny" ? "tag-danger" : "badge-info");
     }
 
-    // ---------- 审批卡片（§5 Gate 2）----------
+    /* ===========================================================
+       右侧面板：本次运行 Trace（实时刷新）
+       ============================================================ */
+    function refreshLiveTrace() {
+      var box = document.getElementById("live-trace");
+      if (!lastTrace.steps.length) {
+        box.innerHTML = '<div class="muted">运行后在此查看步骤时间线…</div>';
+        return;
+      }
+      var html = "";
+      lastTrace.steps.forEach(function (s) {
+        var cls = s.kind === "allow" ? "tag-success"
+                : s.kind === "deny" ? "tag-danger"
+                : s.kind === "warn" ? "tag-warn" : "";
+        html += '<div class="audit-item">'
+              + '<span class="tag ' + cls + '">' + esc(s.title) + '</span>'
+              + '</div>';
+      });
+      box.innerHTML = html;
+    }
+
+    /* ===========================================================
+       审批卡片（§5 Gate 2）
+       ============================================================ */
     function renderApprovalCard() {
-      const card = document.getElementById("approval-card");
-      const list = document.getElementById("approval-list");
-      const count = document.getElementById("approval-count");
+      var card = document.getElementById("approval-card");
+      var list = document.getElementById("approval-list");
+      var count = document.getElementById("approval-count");
       count.textContent = pendingApprovals.length;
       card.classList.remove("hidden");
-      list.innerHTML = pendingApprovals.map(p => `
-        <div class="bg-base-200 rounded p-2 border border-warning/30" id="approval-${p.approval_id}">
-          <div class="flex items-center justify-between mb-1">
-            <span class="font-mono text-warning font-bold">${p.tool_name}</span>
-            <span class="badge badge-warning badge-xs">待决策</span>
-          </div>
-          <div class="text-base-content/60 mb-1">参数: ${escapeHtml(JSON.stringify(p.arguments || {}))}</div>
-          <div class="text-base-content/50 mb-2 text-xs">原因: ${escapeHtml(p.reason || '-')}</div>
-          <div class="flex gap-2">
-            <button class="btn btn-xs btn-success flex-1" onclick="decideApproval('${p.approval_id}','approved')">✅ 批准</button>
-            <button class="btn btn-xs btn-error flex-1" onclick="decideApproval('${p.approval_id}','rejected')">❌ 拒绝</button>
-          </div>
-          <div class="text-xs mt-1 text-info result-msg hidden"></div>
-        </div>
-      `).join("");
+      list.innerHTML = pendingApprovals.map(function (p) {
+        return '<div class="approval-item" id="approval-' + p.approval_id + '">'
+          + '<div class="approval-head">'
+          + '<span class="approval-tool">' + esc(p.tool_name) + '</span>'
+          + '<span class="tag tag-warn">待决策</span>'
+          + '</div>'
+          + '<div class="approval-reason">参数: ' + esc(JSON.stringify(p.arguments || {})) + '</div>'
+          + '<div class="approval-reason">原因: ' + esc(p.reason || "-") + '</div>'
+          + '<div class="approval-actions">'
+          + '<button class="btn btn-xs btn-primary" onclick="decideApproval(\'' + p.approval_id + '\',\'approved\')">✓ 批准</button>'
+          + '<button class="btn btn-xs btn-danger" onclick="decideApproval(\'' + p.approval_id + '\',\'rejected\')">✗ 拒绝</button>'
+          + '</div>'
+          + '</div>';
+      }).join("");
     }
 
     async function decideApproval(approvalId, decision) {
-      // 1. 调用 approve 或 reject
-      const decideRes = await fetch(API + `/api/approvals/${approvalId}/${decision}`, { method: "POST" });
-      if (!decideRes.ok) {
-        alert("决策失败: " + decideRes.status);
-        return;
-      }
-      // 标记该审批单已决策
-      const el = document.getElementById(`approval-${approvalId}`);
+      var decideRes = await fetch(
+        API + "/api/approvals/" + approvalId + "/" + decision,
+        { method: "POST" }
+      );
+      if (!decideRes.ok) { alert("决策失败: " + decideRes.status); return; }
+      var el = document.getElementById("approval-" + approvalId);
       if (el) {
-        el.querySelector(".badge").className = "badge badge-xs " + (decision === "approved" ? "badge-success" : "badge-error");
-        el.querySelector(".badge").textContent = decision === "approved" ? "已批准" : "已拒绝";
-        el.querySelectorAll("button").forEach(b => b.disabled = true);
+        var badge = el.querySelector(".tag");
+        badge.className = "tag " + (decision === "approved" ? "tag-success" : "tag-danger");
+        badge.textContent = decision === "approved" ? "已批准" : "已拒绝";
+        el.querySelectorAll("button").forEach(function (b) { b.disabled = true; });
       }
-      // 2. resume 恢复图执行
-      const resumeRes = await fetch(API + `/api/approvals/${approvalId}/resume`, { method: "POST" });
+      var resumeRes = await fetch(
+        API + "/api/approvals/" + approvalId + "/resume",
+        { method: "POST" }
+      );
       if (resumeRes.ok) {
-        const d = await resumeRes.json();
-        const msg = el?.querySelector(".result-msg");
-        if (msg) {
-          msg.textContent = `结果: ${d.decision} ✓`;
-          msg.classList.remove("hidden");
+        var d = await resumeRes.json();
+        if (el) {
+          var msg = el.querySelector(".approval-actions");
+          var r = document.createElement("div");
+          r.className = "muted";
+          r.style.marginTop = "5px";
+          r.textContent = "结果: " + d.decision + " ✓";
+          msg.appendChild(r);
         }
       }
     }
 
-    // 极简 Markdown 渲染（代码块 + 行内代码）
-    function renderMarkdown(text) {
-      let safe = escapeHtml(text);
-      safe = safe.replace(/`([^`]+)`/g, '<code class="bg-base-300 px-1 rounded text-info">$1</code>');
-      safe = safe.replace(/\n/g, "<br/>");
-      return safe;
-    }
-
-    function escapeHtml(s) {
-      return s.replace(/[&<>"']/g, c => ({
-        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-      }[c]));
+    /* ===========================================================
+       工具函数
+       ============================================================ */
+    function esc(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
     }
   </script>
 </body>

@@ -219,8 +219,27 @@ def _register_routes(app: FastAPI) -> None:
             "status": "ok",
             "version": deps.settings.app_version,
             "engine": "langgraph",
+            "model_mode": "fake" if deps.settings.use_fake_model else "api",
+            "model_name": (
+                "fake-chat-model"
+                if deps.settings.use_fake_model
+                else deps.settings.openai_compatible_model
+            ),
             "kill_switch": deps.settings.kill_switch,
         }
+
+    @app.get("/api/tools")
+    async def list_tools(request: Request) -> dict:
+        """向同源前端提供工具目录；生产环境仍由 MCP Client 查询 MCP Server。"""
+        deps = _get_deps(request)
+        try:
+            tools = await deps.mcp_invoker.list_tools()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"tool catalog unavailable: {type(exc).__name__}",
+            ) from exc
+        return {"tools": tools}
 
     @app.get("/api/traces/{run_id}")
     def get_trace(run_id: str, request: Request) -> dict:
@@ -332,6 +351,15 @@ def _register_routes(app: FastAPI) -> None:
             "tool_calls": tool_calls,
             "trace_steps": trace_steps,
         }
+
+    # ---- 知识库文档导入（/api/knowledge/...）----
+    # 服务按请求构建：从当前请求的 deps 容器装配 rag_store（容器内缓存）。
+    # rag_store 懒建；Milvus / Embedding 未配置时返回 503（知识库暂不可用），
+    # 不影响应用启动与其它端点。
+    from app_v4.knowledge.bootstrap import build_knowledge_service
+    from app_v4.knowledge.router import build_router
+
+    app.include_router(build_router(_get_deps))
 
     # 标准 MCP 传输由独立 FastMCP Server 提供（Streamable HTTP，路径 /mcp）。
     # 不再提供 /api/mcp JSON-RPC 兼容端点——禁止手写 JSON-RPC 与官方 SDK 并存。
